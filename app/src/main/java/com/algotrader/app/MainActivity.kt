@@ -100,7 +100,7 @@ class MainActivity : Activity() {
         )
 
         root.addView(
-            label("\nAlgoTrader v0.1.0")
+            label("\nAlgoTrader v${packageManager.getPackageInfo(packageName, 0).versionName}")
         )
 
         setContentView(root)
