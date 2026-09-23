@@ -1,13 +1,10 @@
-name: Android APK Release
+name: Android Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build:
@@ -17,33 +14,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: '17'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+          yes | sdkmanager --licenses
 
-      - name: Build debug APK
-        run: ./gradlew clean assembleDebug
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: AlgoTrader-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            app/build/outputs/apk/debug/app-debug.apk \
-            --title "AlgoTrader ${GITHUB_REF_NAME}" \
-            --generate-notes
+          name: AlgoTrader-debug
+          path: app/build/outputs/apk/debug/*.apk
