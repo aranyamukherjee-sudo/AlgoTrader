@@ -21,3 +21,8 @@ local.properties
 
 # APK outputs
 *.apk
+
+# Android signing keys
+keystore/
+*.jks
+*.keystore
