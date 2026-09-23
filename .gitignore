@@ -1,0 +1,23 @@
+# Gradle
+.gradle/
+**/build/
+
+# Android
+.externalNativeBuild/
+.cxx/
+
+# Local configuration
+local.properties
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+
+# Temporary AAPT tests
+.aapt-test/
+
+# APK outputs
+*.apk
