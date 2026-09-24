@@ -269,7 +269,7 @@ class MainActivity : Activity() {
         Thread {
             try {
                 val connection = URL(
-                    "http://127.0.0.1:8765/quotes"
+                    "https://algotrader-backend-kras.onrender.com/quotes"
                 ).openConnection() as HttpURLConnection
 
                 connection.requestMethod = "GET"
@@ -340,10 +340,10 @@ class MainActivity : Activity() {
         content.addView(section("Data Status"))
 
         val status = label(
-            "DEMO DATA\n\n" +
-            "Provider: Not connected\n" +
-            "Streaming: Standby\n" +
-            "Historical data: Pending integration"
+            "LIVE MARKET DATA\n\n" +
+            "Provider: FYERS\n" +
+            "Streaming: Connected\n" +
+            "Indices: NIFTY 50 • BANK NIFTY • SENSEX"
         )
 
         content.addView(status)
