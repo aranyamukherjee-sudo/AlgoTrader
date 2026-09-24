@@ -12,11 +12,29 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.app.Activity
+import android.os.Handler
+import android.os.Looper
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
 
 class MainActivity : Activity() {
 
     private lateinit var content: LinearLayout
     private lateinit var bottomNav: LinearLayout
+
+    private lateinit var niftyPriceLabel: TextView
+    private lateinit var bankNiftyPriceLabel: TextView
+    private lateinit var sensexPriceLabel: TextView
+
+    private val liveHandler = Handler(Looper.getMainLooper())
+
+    private val liveUpdateRunnable = object : Runnable {
+        override fun run() {
+            fetchLiveQuotes()
+            liveHandler.postDelayed(this, 3000)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -121,10 +139,13 @@ class MainActivity : Activity() {
     private fun showHome() {
         clearContent()
 
+        liveHandler.removeCallbacks(liveUpdateRunnable)
+        liveHandler.post(liveUpdateRunnable)
+
         content.addView(title("AlgoTrader"))
         content.addView(label("Market Dashboard"))
 
-        val demo = label("● DEMO DATA — live market feed will be connected later")
+        val demo = label("● LIVE DATA — FYERS")
         demo.setTextColor(Color.YELLOW)
         content.addView(demo)
 
@@ -150,7 +171,7 @@ class MainActivity : Activity() {
 
         content.addView(section("NIFTY 50"))
         addInstrumentSelector("NIFTY 50", "NIFTY FUT")
-        addChart(
+        niftyPriceLabel = addChart(
             "NIFTY 50",
             25000f,
             floatArrayOf(
@@ -162,7 +183,7 @@ class MainActivity : Activity() {
 
         content.addView(section("BANK NIFTY"))
         addInstrumentSelector("BANK NIFTY", "BANK NIFTY FUT")
-        addChart(
+        bankNiftyPriceLabel = addChart(
             "BANK NIFTY",
             57500f,
             floatArrayOf(
@@ -174,7 +195,7 @@ class MainActivity : Activity() {
 
         content.addView(section("SENSEX"))
         addInstrumentSelector("SENSEX", "SENSEX FUT")
-        addChart(
+        sensexPriceLabel = addChart(
             "SENSEX",
             82000f,
             floatArrayOf(
@@ -217,15 +238,15 @@ class MainActivity : Activity() {
         name: String,
         current: Float,
         values: FloatArray
-    ) {
+    ): TextView {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(0, 8, 0, 12)
         }
 
-        card.addView(
-            label("$name   ${formatNumber(current)}")
-        )
+        val priceLabel = label("$name   ${formatNumber(current)}")
+
+        card.addView(priceLabel)
 
         card.addView(
             SimpleChartView(this, values),
@@ -236,10 +257,73 @@ class MainActivity : Activity() {
         )
 
         content.addView(card)
+
+        return priceLabel
     }
 
     private fun formatNumber(value: Float): String {
-        return String.format("%,.0f", value)
+        return String.format("%,.2f", value)
+    }
+
+    private fun fetchLiveQuotes() {
+        Thread {
+            try {
+                val connection = URL(
+                    "http://127.0.0.1:8765/quotes"
+                ).openConnection() as HttpURLConnection
+
+                connection.requestMethod = "GET"
+                connection.connectTimeout = 2000
+                connection.readTimeout = 2000
+
+                val response = connection.inputStream
+                    .bufferedReader()
+                    .use { it.readText() }
+
+                connection.disconnect()
+
+                val root = JSONObject(response)
+                val quotes = root.getJSONObject("quotes")
+
+                val nifty = quotes
+                    .getJSONObject("NSE:NIFTY50-INDEX")
+                    .getDouble("ltp")
+
+                val bankNifty = quotes
+                    .getJSONObject("NSE:NIFTYBANK-INDEX")
+                    .getDouble("ltp")
+
+                val sensex = quotes
+                    .getJSONObject("BSE:SENSEX-INDEX")
+                    .getDouble("ltp")
+
+                runOnUiThread {
+                    niftyPriceLabel.text =
+                        "NIFTY 50   ${formatNumber(nifty.toFloat())}"
+
+                    bankNiftyPriceLabel.text =
+                        "BANK NIFTY   ${formatNumber(bankNifty.toFloat())}"
+
+                    sensexPriceLabel.text =
+                        "SENSEX   ${formatNumber(sensex.toFloat())}"
+                }
+
+            } catch (error: Exception) {
+                runOnUiThread {
+                    if (::niftyPriceLabel.isInitialized) {
+                        niftyPriceLabel.text = "NIFTY 50   Bridge unavailable"
+                    }
+
+                    if (::bankNiftyPriceLabel.isInitialized) {
+                        bankNiftyPriceLabel.text = "BANK NIFTY   Bridge unavailable"
+                    }
+
+                    if (::sensexPriceLabel.isInitialized) {
+                        sensexPriceLabel.text = "SENSEX   Bridge unavailable"
+                    }
+                }
+            }
+        }.start()
     }
 
     private fun showMarketData() {
@@ -304,6 +388,11 @@ class MainActivity : Activity() {
         content.addView(section("Backtest Engine"))
         content.addView(label("Historical data: Pending integration"))
     }
+    override fun onDestroy() {
+        liveHandler.removeCallbacks(liveUpdateRunnable)
+        super.onDestroy()
+    }
+
 }
 
 class SimpleChartView(

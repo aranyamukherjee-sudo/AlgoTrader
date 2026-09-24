@@ -26,3 +26,25 @@ local.properties
 keystore/
 *.jks
 *.keystore
+
+# Python / backend
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Runtime logs
+*.log
+
+# Kotlin/Gradle caches
+.kotlin/
+.gradle/
+build/
+**/build/
+
+# Local FYERS test scripts
+fyers_auth.py
+fyers_bridge.py
+fyers_live_test.py
+fyers_ws_test.py
