@@ -42,6 +42,7 @@ kotlin {
 }
 
 dependencies {
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation(project(":core:domain"))
     implementation(project(":core:strategy"))
     implementation(project(":core:execution"))
