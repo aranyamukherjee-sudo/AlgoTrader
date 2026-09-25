@@ -6,7 +6,7 @@ import time
 import requests
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fyers_apiv3.FyersWebsocket import data_ws
 
 
@@ -216,7 +216,7 @@ def quotes():
 
 
 @app.websocket("/ws/quotes")
-async def quotes_websocket(websocket):
+async def quotes_websocket(websocket: WebSocket):
     await websocket.accept()
 
     try:
