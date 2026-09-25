@@ -1,4 +1,5 @@
 import os
+import hashlib
 import threading
 from datetime import datetime, timezone
 
@@ -123,11 +124,21 @@ def startup():
 
 @app.get("/health")
 def health():
+    token = os.getenv("FYERS_ACCESS_TOKEN", "")
+    token_fingerprint = (
+        hashlib.sha256(token.encode()).hexdigest()
+        if token
+        else None
+    )
+
     return {
         "status": "ok",
         "service": "AlgoTrader Market Data API",
         "fyers": fyers_status,
         "last_error": last_fyers_error,
+        "token_configured": bool(token),
+        "token_length": len(token),
+        "token_fingerprint": token_fingerprint,
     }
 
 
