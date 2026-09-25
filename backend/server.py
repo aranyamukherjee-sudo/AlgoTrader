@@ -1,5 +1,8 @@
 import os
+import hashlib
 import threading
+import time
+import requests
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -21,6 +24,56 @@ fyers_status = "not_configured"
 last_fyers_error = None
 
 
+def refresh_access_token():
+    global last_fyers_error
+
+    app_id = os.getenv("FYERS_APP_ID")
+    secret = os.getenv("FYERS_APP_SECRET")
+    refresh_token = os.getenv("FYERS_REFRESH_TOKEN")
+    pin = os.getenv("FYERS_PIN")
+
+    if not all([app_id, secret, refresh_token, pin]):
+        print("FYERS refresh credentials incomplete", flush=True)
+        return None
+
+    app_id_hash = hashlib.sha256(
+        f"{app_id}:{secret}".encode()
+    ).hexdigest()
+
+    try:
+        response = requests.post(
+            "https://api-t1.fyers.in/api/v3/validate-refresh-token",
+            json={
+                "grant_type": "refresh_token",
+                "appIdHash": app_id_hash,
+                "refresh_token": refresh_token,
+                "pin": pin,
+            },
+            timeout=15,
+        )
+
+        data = response.json()
+
+        if data.get("s") == "ok" and data.get("access_token"):
+            print("FYERS access token refreshed automatically", flush=True)
+            last_fyers_error = None
+            return data["access_token"]
+
+        print(
+            f"FYERS refresh failed: HTTP {response.status_code} "
+            f"code={data.get('code')} message={data.get('message')}",
+            flush=True,
+        )
+
+        last_fyers_error = str(data)
+        return None
+
+    except Exception as error:
+        print(f"FYERS refresh exception: {error}", flush=True)
+        last_fyers_error = str(error)
+        return None
+
+
 def on_message(message):
     symbol = message.get("symbol")
 
@@ -31,15 +84,11 @@ def on_message(message):
                 "received_at": datetime.now(timezone.utc).isoformat(),
             }
 
-        print("FYERS DATA:", symbol, message, flush=True)
-
 
 def on_error(error):
-    global fyers_status
-    global last_fyers_error
+    global fyers_status, last_fyers_error
 
     print("FYERS ERROR:", error, flush=True)
-
     last_fyers_error = str(error)
 
     if isinstance(error, dict) and error.get("code") == -99:
@@ -60,13 +109,6 @@ def on_close(message):
 def on_open():
     global fyers_status
 
-    if fyers_status == "auth_expired":
-        print(
-            "FYERS socket opened but authentication is expired",
-            flush=True,
-        )
-        return
-
     fyers_status = "connected"
 
     print("FYERS WebSocket connected", flush=True)
@@ -81,20 +123,14 @@ def on_open():
     socket.keep_running()
 
 
-def start_fyers():
-    global socket
-    global fyers_status
-    global last_fyers_error
+def connect_fyers(access_token):
+    global socket, fyers_status
 
     app_id = os.getenv("FYERS_APP_ID")
-    access_token = os.getenv("FYERS_ACCESS_TOKEN")
 
     if not app_id or not access_token:
         fyers_status = "not_configured"
-        print("FYERS credentials not configured", flush=True)
         return
-
-    last_fyers_error = None
 
     socket = data_ws.FyersDataSocket(
         access_token=f"{app_id}:{access_token}",
@@ -116,9 +152,44 @@ def start_fyers():
     ).start()
 
 
+def auth_manager():
+    global fyers_status
+
+    # Always try refresh first after a restart.
+    access_token = refresh_access_token()
+
+    # Fall back to the currently configured token if refresh fails.
+    if not access_token:
+        access_token = os.getenv("FYERS_ACCESS_TOKEN")
+
+    if not access_token:
+        fyers_status = "auth_expired"
+        return
+
+    connect_fyers(access_token)
+
+    while True:
+        # Refresh before the access token normally expires.
+        time.sleep(45 * 60)
+
+        new_token = refresh_access_token()
+
+        if new_token:
+            try:
+                if socket:
+                    socket.close()
+            except Exception:
+                pass
+
+            connect_fyers(new_token)
+
+
 @app.on_event("startup")
 def startup():
-    start_fyers()
+    threading.Thread(
+        target=auth_manager,
+        daemon=True,
+    ).start()
 
 
 @app.get("/health")
