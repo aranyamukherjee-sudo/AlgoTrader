@@ -57,6 +57,8 @@ def on_open():
     print("FYERS WebSocket connected")
     print("Subscribed:", SYMBOLS)
 
+    socket.keep_running()
+
 
 def start_fyers():
     global socket
