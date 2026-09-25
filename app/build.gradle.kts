@@ -21,8 +21,8 @@ android {
             val keyAliasValue = System.getenv("ANDROID_KEY_ALIAS")
             val keyPasswordValue = System.getenv("ANDROID_KEY_PASSWORD")
 
+            storeFile = rootProject.file("keystore/algotrader-release.jks")
             if (keystorePassword != null && keyAliasValue != null && keyPasswordValue != null) {
-                storeFile = rootProject.file("keystore/algotrader-release.jks")
                 storePassword = keystorePassword
                 keyAlias = keyAliasValue
                 keyPassword = keyPasswordValue

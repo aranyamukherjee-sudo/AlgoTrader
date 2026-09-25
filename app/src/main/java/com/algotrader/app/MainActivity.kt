@@ -32,7 +32,7 @@ class MainActivity : Activity() {
     private val liveUpdateRunnable = object : Runnable {
         override fun run() {
             fetchLiveQuotes()
-            liveHandler.postDelayed(this, 3000)
+            liveHandler.postDelayed(this, 1000)
         }
     }
 
@@ -267,20 +267,31 @@ class MainActivity : Activity() {
 
     private fun fetchLiveQuotes() {
         Thread {
+            var connection: HttpURLConnection? = null
+
             try {
-                val connection = URL(
+                connection = URL(
                     "https://algotrader-backend-kras.onrender.com/quotes"
                 ).openConnection() as HttpURLConnection
 
                 connection.requestMethod = "GET"
-                connection.connectTimeout = 2000
-                connection.readTimeout = 2000
+                connection.connectTimeout = 10000
+                connection.readTimeout = 10000
+                connection.useCaches = false
 
-                val response = connection.inputStream
-                    .bufferedReader()
-                    .use { it.readText() }
+                val responseCode = connection.responseCode
 
-                connection.disconnect()
+                val stream = if (responseCode in 200..299) {
+                    connection.inputStream
+                } else {
+                    connection.errorStream
+                }
+
+                val response = stream?.bufferedReader()?.use { it.readText() } ?: ""
+
+                if (responseCode !in 200..299) {
+                    throw Exception("HTTP $responseCode: $response")
+                }
 
                 val root = JSONObject(response)
                 val quotes = root.getJSONObject("quotes")
@@ -309,19 +320,23 @@ class MainActivity : Activity() {
                 }
 
             } catch (error: Exception) {
+                val message = error.message ?: error.javaClass.simpleName
+
                 runOnUiThread {
                     if (::niftyPriceLabel.isInitialized) {
-                        niftyPriceLabel.text = "NIFTY 50   Bridge unavailable"
+                        niftyPriceLabel.text = "NIFTY 50   $message"
                     }
 
                     if (::bankNiftyPriceLabel.isInitialized) {
-                        bankNiftyPriceLabel.text = "BANK NIFTY   Bridge unavailable"
+                        bankNiftyPriceLabel.text = "BANK NIFTY   Connection error"
                     }
 
                     if (::sensexPriceLabel.isInitialized) {
-                        sensexPriceLabel.text = "SENSEX   Bridge unavailable"
+                        sensexPriceLabel.text = "SENSEX   Connection error"
                     }
                 }
+            } finally {
+                connection?.disconnect()
             }
         }.start()
     }
