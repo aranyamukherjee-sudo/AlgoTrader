@@ -1,4 +1,5 @@
 import os
+import asyncio
 import hashlib
 import threading
 import time
@@ -212,3 +213,24 @@ def quotes():
         "fyers": fyers_status,
         "quotes": data,
     }
+
+
+@app.websocket("/ws/quotes")
+async def quotes_websocket(websocket):
+    await websocket.accept()
+
+    try:
+        while True:
+            with lock:
+                data = dict(latest_quotes)
+
+            await websocket.send_json({
+                "status": "ok",
+                "fyers": fyers_status,
+                "quotes": data,
+            })
+
+            await asyncio.sleep(0.25)
+
+    except Exception as error:
+        print(f"Android WebSocket disconnected: {error}", flush=True)
