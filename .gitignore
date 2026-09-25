@@ -48,3 +48,6 @@ fyers_auth.py
 fyers_bridge.py
 fyers_live_test.py
 fyers_ws_test.py
+
+# Local secrets
+.secrets/
