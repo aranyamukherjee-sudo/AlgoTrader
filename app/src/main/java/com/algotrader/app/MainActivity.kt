@@ -15,8 +15,11 @@ import android.app.Activity
 import android.os.Handler
 import android.os.Looper
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 
 class MainActivity : Activity() {
 
@@ -28,12 +31,69 @@ class MainActivity : Activity() {
     private lateinit var sensexPriceLabel: TextView
 
     private val liveHandler = Handler(Looper.getMainLooper())
+    private val wsClient = OkHttpClient()
+    private var quotesWebSocket: WebSocket? = null
 
-    private val liveUpdateRunnable = object : Runnable {
-        override fun run() {
-            fetchLiveQuotes()
-            liveHandler.postDelayed(this, 1000)
-        }
+    private fun connectQuotesWebSocket() {
+        val request = Request.Builder()
+            .url("wss://algotrader-backend-kras.onrender.com/ws/quotes")
+            .removeHeader("Origin")
+            .build()
+
+        quotesWebSocket = wsClient.newWebSocket(
+            request,
+            object : WebSocketListener() {
+
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    runOnUiThread {
+                        // Connection established.
+                    }
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    try {
+                        val root = JSONObject(text)
+                        val quotes = root.optJSONObject("quotes") ?: return
+
+                        val nifty = quotes.optJSONObject("NSE:NIFTY50-INDEX")
+                            ?.optDouble("ltp", Double.NaN) ?: Double.NaN
+                        val bankNifty = quotes.optJSONObject("NSE:NIFTYBANK-INDEX")
+                            ?.optDouble("ltp", Double.NaN) ?: Double.NaN
+                        val sensex = quotes.optJSONObject("BSE:SENSEX-INDEX")
+                            ?.optDouble("ltp", Double.NaN) ?: Double.NaN
+
+                        runOnUiThread {
+                            if (!nifty.isNaN()) {
+                                niftyPriceLabel.text = "NIFTY 50  %.2f".format(nifty)
+                            }
+                            if (!bankNifty.isNaN()) {
+                                bankNiftyPriceLabel.text = "BANK NIFTY  %.2f".format(bankNifty)
+                            }
+                            if (!sensex.isNaN()) {
+                                sensexPriceLabel.text = "SENSEX  %.2f".format(sensex)
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+
+                override fun onFailure(
+                    webSocket: WebSocket,
+                    t: Throwable,
+                    response: Response?
+                ) {
+                    quotesWebSocket = null
+
+                    runOnUiThread {
+                        // Reconnect automatically after a short delay.
+                        liveHandler.postDelayed(
+                            { connectQuotesWebSocket() },
+                            2000
+                        )
+                    }
+                }
+            }
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -139,8 +199,6 @@ class MainActivity : Activity() {
     private fun showHome() {
         clearContent()
 
-        liveHandler.removeCallbacks(liveUpdateRunnable)
-        liveHandler.post(liveUpdateRunnable)
 
         content.addView(title("AlgoTrader"))
         content.addView(label("Market Dashboard"))
@@ -265,81 +323,7 @@ class MainActivity : Activity() {
         return String.format("%,.2f", value)
     }
 
-    private fun fetchLiveQuotes() {
-        Thread {
-            var connection: HttpURLConnection? = null
 
-            try {
-                connection = URL(
-                    "https://algotrader-backend-kras.onrender.com/quotes"
-                ).openConnection() as HttpURLConnection
-
-                connection.requestMethod = "GET"
-                connection.connectTimeout = 10000
-                connection.readTimeout = 10000
-                connection.useCaches = false
-
-                val responseCode = connection.responseCode
-
-                val stream = if (responseCode in 200..299) {
-                    connection.inputStream
-                } else {
-                    connection.errorStream
-                }
-
-                val response = stream?.bufferedReader()?.use { it.readText() } ?: ""
-
-                if (responseCode !in 200..299) {
-                    throw Exception("HTTP $responseCode: $response")
-                }
-
-                val root = JSONObject(response)
-                val quotes = root.getJSONObject("quotes")
-
-                val nifty = quotes
-                    .getJSONObject("NSE:NIFTY50-INDEX")
-                    .getDouble("ltp")
-
-                val bankNifty = quotes
-                    .getJSONObject("NSE:NIFTYBANK-INDEX")
-                    .getDouble("ltp")
-
-                val sensex = quotes
-                    .getJSONObject("BSE:SENSEX-INDEX")
-                    .getDouble("ltp")
-
-                runOnUiThread {
-                    niftyPriceLabel.text =
-                        "NIFTY 50   ${formatNumber(nifty.toFloat())}"
-
-                    bankNiftyPriceLabel.text =
-                        "BANK NIFTY   ${formatNumber(bankNifty.toFloat())}"
-
-                    sensexPriceLabel.text =
-                        "SENSEX   ${formatNumber(sensex.toFloat())}"
-                }
-
-            } catch (error: Exception) {
-                val message = error.message ?: error.javaClass.simpleName
-
-                runOnUiThread {
-                    if (::niftyPriceLabel.isInitialized) {
-                        niftyPriceLabel.text = "NIFTY 50   $message"
-                    }
-
-                    if (::bankNiftyPriceLabel.isInitialized) {
-                        bankNiftyPriceLabel.text = "BANK NIFTY   Connection error"
-                    }
-
-                    if (::sensexPriceLabel.isInitialized) {
-                        sensexPriceLabel.text = "SENSEX   Connection error"
-                    }
-                }
-            } finally {
-                connection?.disconnect()
-            }
-        }.start()
-    }
 
     private fun showMarketData() {
         clearContent()
@@ -404,7 +388,6 @@ class MainActivity : Activity() {
         content.addView(label("Historical data: Pending integration"))
     }
     override fun onDestroy() {
-        liveHandler.removeCallbacks(liveUpdateRunnable)
         super.onDestroy()
     }
 
