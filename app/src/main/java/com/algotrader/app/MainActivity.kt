@@ -33,6 +33,155 @@ class MainActivity : Activity() {
     private val liveHandler = Handler(Looper.getMainLooper())
     private val wsClient = OkHttpClient()
     private var quotesWebSocket: WebSocket? = null
+    private var selectedTimeframe = "1m"
+    private val chartViews = mutableMapOf<String, SimpleChartView>()
+
+    private fun loadHistory(symbol: String, chartName: String) {
+        val resolution = timeframeResolution()
+
+        val request = Request.Builder()
+            .url(
+                "https://algotrader-backend-kras.onrender.com/history" +
+                    "?symbol=$symbol&resolution=$resolution&days=5"
+            )
+            .build()
+
+        wsClient.newCall(request).enqueue(object : okhttp3.Callback {
+
+            override fun onFailure(
+                call: okhttp3.Call,
+                e: java.io.IOException
+            ) {
+                runOnUiThread {
+                    when (chartName) {
+                        "NIFTY 50" ->
+                            niftyPriceLabel.text = "NIFTY 50  NETWORK ERROR"
+
+                        "BANK NIFTY" ->
+                            bankNiftyPriceLabel.text = "BANK NIFTY  NETWORK ERROR"
+
+                        "SENSEX" ->
+                            sensexPriceLabel.text = "SENSEX  NETWORK ERROR"
+                    }
+                }
+            }
+
+            override fun onResponse(
+                call: okhttp3.Call,
+                response: Response
+            ) {
+                response.use {
+                    val body = response.body?.string() ?: ""
+
+                    if (!response.isSuccessful) {
+                        runOnUiThread {
+                            when (chartName) {
+                                "NIFTY 50" ->
+                                    niftyPriceLabel.text =
+                                        "NIFTY 50  HTTP ${response.code}"
+
+                                "BANK NIFTY" ->
+                                    bankNiftyPriceLabel.text =
+                                        "BANK NIFTY  HTTP ${response.code}"
+
+                                "SENSEX" ->
+                                    sensexPriceLabel.text =
+                                        "SENSEX  HTTP ${response.code}"
+                            }
+                        }
+                        return
+                    }
+
+                    try {
+                        val root = JSONObject(body)
+                        val array = root.optJSONArray("candles")
+
+                        if (array == null || array.length() == 0) {
+                            runOnUiThread {
+                                when (chartName) {
+                                    "NIFTY 50" ->
+                                        niftyPriceLabel.text = "NIFTY 50  NO CANDLES"
+
+                                    "BANK NIFTY" ->
+                                        bankNiftyPriceLabel.text = "BANK NIFTY  NO CANDLES"
+
+                                    "SENSEX" ->
+                                        sensexPriceLabel.text = "SENSEX  NO CANDLES"
+                                }
+                            }
+                            return
+                        }
+
+                        val candles = mutableListOf<Candle>()
+
+                        for (i in 0 until array.length()) {
+                            val candle = array.optJSONArray(i) ?: continue
+
+                            if (candle.length() >= 5) {
+                                candles.add(
+                                    Candle(
+                                        open = candle.getDouble(1).toFloat(),
+                                        high = candle.getDouble(2).toFloat(),
+                                        low = candle.getDouble(3).toFloat(),
+                                        close = candle.getDouble(4).toFloat()
+                                    )
+                                )
+                            }
+                        }
+
+                        if (candles.isEmpty()) return
+
+                        runOnUiThread {
+                            chartViews[chartName]?.setCandles(candles)
+
+                            val latestClose = candles.last().close
+
+                            when (chartName) {
+                                "NIFTY 50" ->
+                                    niftyPriceLabel.text =
+                                        "NIFTY 50  ${formatNumber(latestClose)}"
+
+                                "BANK NIFTY" ->
+                                    bankNiftyPriceLabel.text =
+                                        "BANK NIFTY  ${formatNumber(latestClose)}"
+
+                                "SENSEX" ->
+                                    sensexPriceLabel.text =
+                                        "SENSEX  ${formatNumber(latestClose)}"
+                            }
+                        }
+
+                    } catch (e: Exception) {
+                        runOnUiThread {
+                            when (chartName) {
+                                "NIFTY 50" ->
+                                    niftyPriceLabel.text = "NIFTY 50  PARSE ERROR"
+
+                                "BANK NIFTY" ->
+                                    bankNiftyPriceLabel.text = "BANK NIFTY  PARSE ERROR"
+
+                                "SENSEX" ->
+                                    sensexPriceLabel.text = "SENSEX  PARSE ERROR"
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    private fun timeframeResolution(): String {
+        return when (selectedTimeframe) {
+            "1m" -> "1"
+            "3m" -> "3"
+            "5m" -> "5"
+            "15m" -> "15"
+            "30m" -> "30"
+            "1h" -> "60"
+            "1D" -> "D"
+            else -> "1"
+        }
+    }
 
     private fun connectQuotesWebSocket() {
         val request = Request.Builder()
@@ -207,16 +356,28 @@ class MainActivity : Activity() {
         demo.setTextColor(Color.YELLOW)
         content.addView(demo)
 
-        content.addView(section("Timeframe"))
+        content.addView(section("Timeframe: $selectedTimeframe"))
 
         val timeframeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
         }
 
-        listOf("1m", "5m", "15m", "1h", "1D").forEach {
+        listOf("1m", "5m", "15m", "1h", "1D").forEach { timeframe ->
             val button = Button(this).apply {
-                text = it
+                text = if (timeframe == selectedTimeframe) {
+                    "✓ $timeframe"
+                } else {
+                    timeframe
+                }
+
                 textSize = 11f
+
+                setOnClickListener {
+                    if (selectedTimeframe != timeframe) {
+                        selectedTimeframe = timeframe
+                        showHome()
+                    }
+                }
             }
 
             timeframeRow.addView(
@@ -231,37 +392,27 @@ class MainActivity : Activity() {
         addInstrumentSelector("NIFTY 50", "NIFTY FUT")
         niftyPriceLabel = addChart(
             "NIFTY 50",
-            25000f,
-            floatArrayOf(
-                24780f, 24840f, 24720f, 24900f,
-                24860f, 24980f, 25040f, 24920f,
-                25080f, 25140f, 25000f, 25180f
-            )
+            0f,
+            floatArrayOf()
         )
 
         content.addView(section("BANK NIFTY"))
         addInstrumentSelector("BANK NIFTY", "BANK NIFTY FUT")
         bankNiftyPriceLabel = addChart(
             "BANK NIFTY",
-            57500f,
-            floatArrayOf(
-                57100f, 57350f, 57200f, 57500f,
-                57400f, 57800f, 57650f, 57900f,
-                57750f, 58100f, 57950f, 58200f
-            )
+            0f,
+            floatArrayOf()
         )
 
         content.addView(section("SENSEX"))
         addInstrumentSelector("SENSEX", "SENSEX FUT")
         sensexPriceLabel = addChart(
             "SENSEX",
-            82000f,
-            floatArrayOf(
-                81600f, 81800f, 81750f, 82000f,
-                81900f, 82250f, 82100f, 82400f,
-                82300f, 82600f, 82500f, 82800f
-            )
+            0f,
+            floatArrayOf()
         )
+
+        loadAllCharts()
     }
 
     private fun addInstrumentSelector(indexName: String, futuresName: String) {
@@ -306,8 +457,28 @@ class MainActivity : Activity() {
 
         card.addView(priceLabel)
 
+        val chartView = SimpleChartView(
+            this,
+            values.mapIndexed { index, close ->
+                val previous = if (index == 0) close else values[index - 1]
+                val open = previous
+                val high = maxOf(open, close) + 30f
+                val low = minOf(open, close) - 30f
+
+                Candle(
+                    open = open,
+                    high = high,
+                    low = low,
+                    close = close
+                )
+            }
+        )
+
+        chartViews[name] = chartView
+
         card.addView(
-            SimpleChartView(this, values),
+            chartView,
+
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 260
@@ -321,6 +492,12 @@ class MainActivity : Activity() {
 
     private fun formatNumber(value: Float): String {
         return String.format("%,.2f", value)
+    }
+
+    private fun loadAllCharts() {
+        loadHistory("NSE:NIFTY50-INDEX", "NIFTY 50")
+        loadHistory("NSE:NIFTYBANK-INDEX", "BANK NIFTY")
+        loadHistory("BSE:SENSEX-INDEX", "SENSEX")
     }
 
 
@@ -393,61 +570,93 @@ class MainActivity : Activity() {
 
 }
 
+data class Candle(
+    val open: Float,
+    val high: Float,
+    val low: Float,
+    val close: Float
+)
+
 class SimpleChartView(
     context: android.content.Context,
-    private val values: FloatArray
+    private var candles: List<Candle>
 ) : View(context) {
 
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        strokeWidth = 5f
-        style = Paint.Style.STROKE
+    fun setCandles(newCandles: List<Candle>) {
+        candles = newCandles
+        invalidate()
     }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
         canvas.drawColor(Color.rgb(15, 20, 27))
 
-        if (values.isEmpty()) return
+        if (candles.isEmpty()) return
 
-        val min = values.minOrNull() ?: return
-        val max = values.maxOrNull() ?: return
+        val min = candles.minOf { it.low }
+        val max = candles.maxOf { it.high }
         val range = (max - min).coerceAtLeast(1f)
 
         val left = 20f
         val right = width - 20f
-        val top = 30f
-        val bottom = height - 30f
+        val top = 20f
+        val bottom = height - 20f
 
-        val path = Path()
-
-        values.forEachIndexed { index, value ->
-            val x = left +
-                    (right - left) *
-                    index.toFloat() /
-                    (values.size - 1).coerceAtLeast(1)
-
-            val y = bottom -
-                    (value - min) /
-                    range *
-                    (bottom - top)
-
-            if (index == 0) {
-                path.moveTo(x, y)
-            } else {
-                path.lineTo(x, y)
-            }
-        }
-
-        paint.color = Color.rgb(80, 200, 120)
-        canvas.drawPath(path, paint)
-
-        paint.color = Color.DKGRAY
+        // Grid
+        paint.color = Color.rgb(55, 62, 72)
         paint.strokeWidth = 1f
 
         for (i in 1..3) {
             val y = top + (bottom - top) * i / 4f
             canvas.drawLine(left, y, right, y, paint)
+        }
+
+        val slot = (right - left) / candles.size
+        val bodyWidth = (slot * 0.55f).coerceAtLeast(3f)
+
+        candles.forEachIndexed { index, candle ->
+
+            val x = left + slot * index + slot / 2f
+
+            fun priceY(price: Float): Float {
+                return bottom -
+                        (price - min) / range *
+                        (bottom - top)
+            }
+
+            val highY = priceY(candle.high)
+            val lowY = priceY(candle.low)
+            val openY = priceY(candle.open)
+            val closeY = priceY(candle.close)
+
+            val bullish = candle.close >= candle.open
+
+            paint.color = if (bullish) {
+                Color.rgb(60, 200, 120)
+            } else {
+                Color.rgb(230, 80, 90)
+            }
+
+            paint.strokeWidth = 2f
+            canvas.drawLine(x, highY, x, lowY, paint)
+
+            val bodyTop = minOf(openY, closeY)
+            val bodyBottom = maxOf(openY, closeY)
+
+            paint.style = Paint.Style.FILL
+
+            canvas.drawRect(
+                x - bodyWidth / 2f,
+                bodyTop,
+                x + bodyWidth / 2f,
+                maxOf(bodyBottom, bodyTop + 2f),
+                paint
+            )
+
+            paint.style = Paint.Style.FILL
         }
     }
 }
