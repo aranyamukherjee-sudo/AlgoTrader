@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from fastapi import FastAPI, WebSocket
 from fyers_apiv3.FyersWebsocket import data_ws
+from fyers_apiv3 import fyersModel
 
 
 app = FastAPI(title="AlgoTrader Market Data API")
@@ -21,6 +22,7 @@ SYMBOLS = [
 latest_quotes = {}
 lock = threading.Lock()
 socket = None
+history_client = None
 fyers_status = "not_configured"
 last_fyers_error = None
 
@@ -125,13 +127,19 @@ def on_open():
 
 
 def connect_fyers(access_token):
-    global socket, fyers_status
+    global socket, history_client, fyers_status
 
     app_id = os.getenv("FYERS_APP_ID")
 
     if not app_id or not access_token:
         fyers_status = "not_configured"
         return
+
+    history_client = fyersModel.FyersModel(
+        client_id=app_id,
+        token=access_token,
+        log_path=""
+    )
 
     socket = data_ws.FyersDataSocket(
         access_token=f"{app_id}:{access_token}",
@@ -201,6 +209,72 @@ def health():
         "fyers": fyers_status,
         "last_error": last_fyers_error,
     }
+
+
+@app.get("/history")
+def history(
+    symbol: str = "NSE:NIFTY50-INDEX",
+    resolution: str = "5",
+    days: int = 5,
+):
+    allowed_symbols = set(SYMBOLS)
+
+    if symbol not in allowed_symbols:
+        return {
+            "status": "error",
+            "message": "Unsupported symbol",
+        }
+
+    if resolution not in {"1", "3", "5", "15", "30", "60", "D"}:
+        return {
+            "status": "error",
+            "message": "Unsupported resolution",
+        }
+
+    if not history_client:
+        return {
+            "status": "error",
+            "message": "FYERS history client not ready",
+        }
+
+    days = max(1, min(days, 30))
+
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date.timestamp() - days * 86400
+
+    data = {
+        "symbol": symbol,
+        "resolution": resolution,
+        "date_format": "0",
+        "range_from": str(int(start_date)),
+        "range_to": str(int(end_date.timestamp())),
+        "cont_flag": "1",
+    }
+
+    try:
+        response = history_client.history(data=data)
+
+        if response.get("s") != "ok":
+            return {
+                "status": "error",
+                "fyers": fyers_status,
+                "response": response,
+            }
+
+        candles = response.get("candles", [])
+
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "resolution": resolution,
+            "candles": candles,
+        }
+
+    except Exception as error:
+        return {
+            "status": "error",
+            "message": str(error),
+        }
 
 
 @app.get("/quotes")
