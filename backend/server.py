@@ -4,7 +4,7 @@ import hashlib
 import threading
 import time
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, WebSocket
 from fyers_apiv3.FyersWebsocket import data_ws
@@ -239,34 +239,74 @@ def history(
 
     days = max(1, min(days, 365))
 
-    end_date = datetime.now(timezone.utc)
-    start_date = end_date.timestamp() - days * 86400
+    # FYERS can limit the amount of intraday history returned by a
+    # single request. Request the complete period in smaller chunks.
+    if resolution == "D":
+        chunk_days = 365
+    elif resolution == "60":
+        chunk_days = 30
+    elif resolution == "30":
+        chunk_days = 15
+    elif resolution == "15":
+        chunk_days = 10
+    elif resolution == "5":
+        chunk_days = 5
+    elif resolution == "3":
+        chunk_days = 3
+    else:  # 1 minute
+        chunk_days = 1
 
-    data = {
-        "symbol": symbol,
-        "resolution": resolution,
-        "date_format": "0",
-        "range_from": str(int(start_date)),
-        "range_to": str(int(end_date.timestamp())),
-        "cont_flag": "1",
-    }
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=days)
+
+    all_candles = {}
 
     try:
-        response = history_client.history(data=data)
+        chunk_start = start_date
 
-        if response.get("s") != "ok":
-            return {
-                "status": "error",
-                "fyers": fyers_status,
-                "response": response,
+        while chunk_start < end_date:
+            chunk_end = min(
+                chunk_start + timedelta(days=chunk_days),
+                end_date,
+            )
+
+            data = {
+                "symbol": symbol,
+                "resolution": resolution,
+                "date_format": "0",
+                "range_from": str(int(chunk_start.timestamp())),
+                "range_to": str(int(chunk_end.timestamp())),
+                "cont_flag": "1",
             }
 
-        candles = response.get("candles", [])
+            response = history_client.history(data=data)
+
+            if response.get("s") != "ok":
+                return {
+                    "status": "error",
+                    "fyers": fyers_status,
+                    "response": response,
+                    "failed_range_from": data["range_from"],
+                    "failed_range_to": data["range_to"],
+                }
+
+            for candle in response.get("candles", []):
+                if candle and len(candle) >= 6:
+                    all_candles[int(candle[0])] = candle
+
+            # Move forward without leaving a gap.
+            chunk_start = chunk_end
+
+        candles = [
+            all_candles[timestamp]
+            for timestamp in sorted(all_candles)
+        ]
 
         return {
             "status": "ok",
             "symbol": symbol,
             "resolution": resolution,
+            "days": days,
             "candles": candles,
         }
 
