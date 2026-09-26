@@ -52,3 +52,4 @@ fyers_ws_test.py
 # Local secrets
 .secrets/
 backend/.env
+fyers_tokens.json

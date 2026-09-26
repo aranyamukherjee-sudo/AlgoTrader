@@ -1,6 +1,5 @@
 import os
 import asyncio
-import hashlib
 import threading
 import time
 import requests
@@ -46,56 +45,6 @@ history_cache_lock = threading.Lock()
 HISTORY_CACHE_TTL = 5 * 60
 
 
-def refresh_access_token():
-    global last_fyers_error
-
-    app_id = os.getenv("FYERS_APP_ID")
-    secret = os.getenv("FYERS_APP_SECRET")
-    refresh_token = os.getenv("FYERS_REFRESH_TOKEN")
-    pin = os.getenv("FYERS_PIN")
-
-    if not all([app_id, secret, refresh_token, pin]):
-        print("FYERS refresh credentials incomplete", flush=True)
-        return None
-
-    app_id_hash = hashlib.sha256(
-        f"{app_id}:{secret}".encode()
-    ).hexdigest()
-
-    try:
-        response = requests.post(
-            "https://api-t1.fyers.in/api/v3/validate-refresh-token",
-            json={
-                "grant_type": "refresh_token",
-                "appIdHash": app_id_hash,
-                "refresh_token": refresh_token,
-                "pin": pin,
-            },
-            timeout=15,
-        )
-
-        data = response.json()
-
-        if data.get("s") == "ok" and data.get("access_token"):
-            print("FYERS access token refreshed automatically", flush=True)
-            last_fyers_error = None
-            return data["access_token"]
-
-        print(
-            f"FYERS refresh failed: HTTP {response.status_code} "
-            f"code={data.get('code')} message={data.get('message')}",
-            flush=True,
-        )
-
-        last_fyers_error = str(data)
-        return None
-
-    except Exception as error:
-        print(f"FYERS refresh exception: {error}", flush=True)
-        last_fyers_error = str(error)
-        return None
-
-
 def on_message(message):
     symbol = message.get("symbol")
 
@@ -107,14 +56,30 @@ def on_message(message):
             }
 
 
+AUTH_ERROR_CODES = {-8, -15, -16, -17, -99}
+
 def on_error(error):
     global fyers_status, last_fyers_error
 
     print("FYERS ERROR:", error, flush=True)
     last_fyers_error = str(error)
 
-    if isinstance(error, dict) and error.get("code") == -99:
+    code = None
+
+    if isinstance(error, dict):
+        code = error.get("code")
+        try:
+            code = int(code)
+        except (TypeError, ValueError):
+            pass
+
+    if code in AUTH_ERROR_CODES:
         fyers_status = "auth_expired"
+        print(
+            "FYERS authentication expired/invalid. "
+            "Generate a new access token through FYERS OAuth.",
+            flush=True,
+        )
     else:
         fyers_status = "error"
 
@@ -181,36 +146,23 @@ def connect_fyers(access_token):
 
 
 def auth_manager():
-    global fyers_status
+    global fyers_status, last_fyers_error
 
-    # Always try refresh first after a restart.
-    access_token = refresh_access_token()
-
-    # Fall back to the currently configured token if refresh fails.
-    if not access_token:
-        access_token = os.getenv("FYERS_ACCESS_TOKEN")
+    # FYERS refresh-token API is disabled for this setup.
+    # Use the access token generated through the normal OAuth flow.
+    access_token = os.getenv("FYERS_ACCESS_TOKEN")
 
     if not access_token:
         fyers_status = "auth_expired"
+        last_fyers_error = "FYERS_ACCESS_TOKEN is not configured"
+        print(
+            "FYERS access token is missing. "
+            "Generate a fresh access token through FYERS OAuth.",
+            flush=True,
+        )
         return
 
     connect_fyers(access_token)
-
-    while True:
-        # Refresh before the access token normally expires.
-        time.sleep(45 * 60)
-
-        new_token = refresh_access_token()
-
-        if new_token:
-            try:
-                if socket:
-                    socket.close()
-            except Exception:
-                pass
-
-            connect_fyers(new_token)
-
 
 @app.on_event("startup")
 def startup():
@@ -226,6 +178,8 @@ def health():
         "status": "ok",
         "service": "AlgoTrader Market Data API",
         "fyers": fyers_status,
+        "auth_mode": "access_token",
+        "access_token_configured": bool(os.getenv("FYERS_ACCESS_TOKEN")),
         "last_error": last_fyers_error,
     }
 
