@@ -237,7 +237,7 @@ def history(
             "message": "FYERS history client not ready",
         }
 
-    days = max(1, min(days, 30))
+    days = max(1, min(days, 365))
 
     end_date = datetime.now(timezone.utc)
     start_date = end_date.timestamp() - days * 86400

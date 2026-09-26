@@ -9,6 +9,8 @@ import android.graphics.Typeface
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -28,6 +30,12 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 
+import com.algotrader.backtest.BacktestConfig
+import com.algotrader.backtest.BacktestEngine
+import com.algotrader.backtest.BacktestResult
+import com.algotrader.backtest.PositionSizing
+import com.algotrader.strategy.CprEmaTrendStrategy
+import com.algotrader.strategy.DonchianEmaTrendStrategy
 /**
  * Real-time candle for the selected instrument/timeframe.
  * All values come from the AlgoTrader backend (FYERS-backed) — never fabricated.
@@ -119,10 +127,12 @@ class MainActivity : Activity() {
 
         setHeaderStatus("Loading ${instrument.displayName}…")
 
+        val historyDays = 365
+
         val request = Request.Builder()
             .url(
                 "$BACKEND_HTTP_BASE/history" +
-                    "?symbol=$requestedSymbol&resolution=$resolution&days=5"
+                    "?symbol=$requestedSymbol&resolution=$resolution&days=$historyDays"
             )
             .build()
 
@@ -771,21 +781,244 @@ class MainActivity : Activity() {
         content.addView(label("Not connected"))
     }
 
-    private fun showBacktest() {
-        clearContent()
+    
+private fun runBacktest() {
+    val uiCandles = candlesByInstrument[selectedInstrument.backendSymbol]
 
-        content.addView(title("Backtest"))
-
-        content.addView(section("Moving Average Crossover"))
-        content.addView(label("Capital: ₹100,000"))
-        content.addView(label("Status: READY"))
-
-        content.addView(section("Backtest Engine"))
-        content.addView(label("Historical data: Pending integration"))
+    if (uiCandles.isNullOrEmpty()) {
+        Toast.makeText(
+            this,
+            "Historical data is not loaded yet. Open Home first and wait for candles.",
+            Toast.LENGTH_LONG
+        ).show()
+        return
     }
+
+    val domainCandles = uiCandles.mapNotNull { candle ->
+        try {
+            com.algotrader.domain.Candle(
+                instrument = com.algotrader.domain.Instrument(
+                    symbol = selectedInstrument.backendSymbol,
+                    exchange = selectedInstrument.backendSymbol.substringBefore(":")
+                ),
+                timeframe = when (selectedTimeframe) {
+                    "1m" -> com.algotrader.domain.Timeframe.MINUTE_1
+                    "5m" -> com.algotrader.domain.Timeframe.MINUTE_5
+                    "15m" -> com.algotrader.domain.Timeframe.MINUTE_15
+                    "30m" -> com.algotrader.domain.Timeframe.MINUTE_30
+                    "1h" -> com.algotrader.domain.Timeframe.HOUR_1
+                    "1D" -> com.algotrader.domain.Timeframe.DAY_1
+                    else -> com.algotrader.domain.Timeframe.MINUTE_5
+                },
+                timestamp = java.time.Instant.ofEpochSecond(candle.timestamp),
+                open = candle.open.toDouble(),
+                high = candle.high.toDouble(),
+                low = candle.low.toDouble(),
+                close = candle.close.toDouble(),
+                volume = candle.volume.toDouble()
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (domainCandles.size < 50) {
+        Toast.makeText(
+            this,
+            "Not enough candles for the selected strategies.",
+            Toast.LENGTH_LONG
+        ).show()
+        return
+    }
+
+    content.removeAllViews()
+
+    content.addView(title("Backtest"))
+
+    content.addView(section("Running"))
+    content.addView(label(
+        "${selectedInstrument.displayName} · $selectedTimeframe"
+    ))
+    content.addView(label(
+        "${domainCandles.size} real FYERS candles"
+    ))
+
+    content.addView(label("Testing CPR + EMA and Donchian + EMA…"))
+
+    Thread {
+        try {
+            val config = BacktestConfig(
+                initialCapital = 100_000.0,
+                positionSizing = PositionSizing.FixedQuantity(1.0)
+            )
+
+            val engine = BacktestEngine(config)
+
+            val results = listOf(
+                engine.run(
+                    CprEmaTrendStrategy(),
+                    domainCandles
+                ),
+                engine.run(
+                    DonchianEmaTrendStrategy(),
+                    domainCandles
+                )
+            )
+
+            runOnUiThread {
+                renderBacktestResults(results, domainCandles.size)
+            }
+
+        } catch (e: Exception) {
+            runOnUiThread {
+                content.removeAllViews()
+                content.addView(title("Backtest"))
+                content.addView(section("Error"))
+                content.addView(label(
+                    e.message ?: "Backtest failed"
+                ))
+            }
+        }
+    }.start()
+}
+
+private fun renderBacktestResults(
+    results: List<BacktestResult>,
+    candleCount: Int
+) {
+    content.removeAllViews()
+
+    content.addView(title("Backtest Results"))
+
+    content.addView(section("Test"))
+
+    content.addView(label(
+        "${selectedInstrument.displayName} · $selectedTimeframe"
+    ))
+
+    content.addView(label(
+        "$candleCount real FYERS candles"
+    ))
+
+    content.addView(label("Capital: ₹100,000 · Position: 1 unit"))
+
+    results.forEach { result ->
+        val m = result.metrics
+
+        content.addView(section(result.strategyName))
+
+        content.addView(label(
+            "Final Equity: ${formatMoney(result.finalEquity)}"
+        ))
+
+        content.addView(label(
+            "Net P&L: ${formatMoney(m.netProfit)}"
+        ))
+
+        content.addView(label(
+            "Return: ${formatPercent(m.totalReturnPercent)}"
+        ))
+
+        content.addView(label(
+            "Trades: ${m.totalTrades}"
+        ))
+
+        content.addView(label(
+            "Win Rate: ${formatPercent(m.winRate * 100.0)}"
+        ))
+
+        content.addView(label(
+            "Profit Factor: ${
+                m.profitFactor?.let {
+                    String.format(Locale.US, "%.2f", it)
+                } ?: "N/A"
+            }"
+        ))
+
+        content.addView(label(
+            "Max Drawdown: ${formatMoney(m.maxDrawdown)} " +
+                "(${formatPercent(m.maxDrawdownPercent)})"
+        ))
+
+        content.addView(label(
+            "Average Trade: ${formatMoney(m.averageTradePnl)}"
+        ))
+
+        content.addView(label(
+            "Winning Trades: ${m.winningTrades} · " +
+                "Losing Trades: ${m.losingTrades}"
+        ))
+    }
+
+    val rerunButton = Button(this).apply {
+        text = "RUN AGAIN"
+        isAllCaps = false
+        setOnClickListener {
+            runBacktest()
+        }
+    }
+
+    content.addView(rerunButton)
+}
+
+private fun showBacktest() {
+    clearContent()
+
+    content.addView(title("Backtest"))
+
+    content.addView(section("Test Configuration"))
+    content.addView(label("Instrument: ${selectedInstrument.displayName}"))
+    content.addView(label("Timeframe: $selectedTimeframe"))
+    content.addView(label("Initial Capital: ₹100,000"))
+    content.addView(label("Position Size: 1 unit"))
+
+    content.addView(section("Strategies"))
+
+    content.addView(label("• CPR + EMA Trend"))
+    content.addView(label("  Daily CPR + EMA(20), long/short"))
+
+    content.addView(label("• Donchian + EMA Trend"))
+    content.addView(label("  Donchian(20) + EMA(50), long/short"))
+
+    val runButton = Button(this).apply {
+        text = "RUN BACKTEST"
+        isAllCaps = false
+        setOnClickListener {
+            runBacktest()
+        }
+    }
+
+    content.addView(runButton)
+
+    content.addView(section("Results"))
+
+    content.addView(label(
+        "Historical data: ${candlesByInstrument[selectedInstrument.backendSymbol]?.size ?: 0} candles"
+    ))
+
+    content.addView(label(
+        "Press RUN BACKTEST to test both strategies on the loaded FYERS data."
+    ))
+}
 }
 
 // ---------------------------------------------------------------------------
+private fun formatMoney(value: Double): String {
+    return String.format(
+        Locale.US,
+        "₹%,.2f",
+        value
+    )
+}
+
+private fun formatPercent(value: Double): String {
+    return String.format(
+        Locale.US,
+        "%.2f%%",
+        value
+    )
+}
+
 // Indicator math — computed locally from real candle closes, never fetched.
 // ---------------------------------------------------------------------------
 
@@ -866,29 +1099,95 @@ class TradingChartView(context: android.content.Context) : View(context) {
     private var isDaily = false
     private var latestPrice: Float? = null
 
+    private var visibleCount = 80
+    private var endIndex = 0
+    private var crosshairIndex = -1
+    private var lastTouchX = 0f
+
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = AXIS_TEXT_COLOR
         textSize = 26f
     }
+
     private val dashedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 2f
         pathEffect = DashPathEffect(floatArrayOf(10f, 8f), 0f)
     }
 
-    private val intradayFormat = SimpleDateFormat("HH:mm", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("Asia/Kolkata")
-    }
-    private val dailyFormat = SimpleDateFormat("dd MMM", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("Asia/Kolkata")
+    private val crosshairPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AXIS_TEXT_COLOR
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        pathEffect = DashPathEffect(floatArrayOf(8f, 7f), 0f)
     }
 
-    fun setData(candles: List<Candle>, ema20: List<Float>, ema50: List<Float>, isDaily: Boolean) {
+    private val infoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xEE151A21.toInt()
+        style = Paint.Style.FILL
+    }
+
+    private val infoTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 19f
+        textAlign = Paint.Align.LEFT
+    }
+
+    private val scaleDetector =
+        ScaleGestureDetector(
+            context,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(
+                    detector: ScaleGestureDetector
+                ): Boolean {
+                    visibleCount =
+                        (visibleCount / detector.scaleFactor)
+                            .toInt()
+                            .coerceIn(
+                                20,
+                                candles.size.coerceAtLeast(20)
+                            )
+
+                    endIndex =
+                        endIndex.coerceIn(
+                            visibleCount - 1,
+                            candles.lastIndex
+                        )
+
+                    invalidate()
+                    return true
+                }
+            }
+        )
+
+    private val intradayFormat =
+        SimpleDateFormat("dd MMM HH:mm", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("Asia/Kolkata")
+        }
+
+    private val dailyFormat =
+        SimpleDateFormat("dd MMM yyyy", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("Asia/Kolkata")
+        }
+
+    fun setData(
+        candles: List<Candle>,
+        ema20: List<Float>,
+        ema50: List<Float>,
+        isDaily: Boolean
+    ) {
         this.candles = candles
         this.ema20 = ema20
         this.ema50 = ema50
         this.isDaily = isDaily
+
+        visibleCount =
+            minOf(80, candles.size.coerceAtLeast(1))
+
+        endIndex = candles.lastIndex
+        crosshairIndex = -1
+
         invalidate()
     }
 
@@ -897,13 +1196,115 @@ class TradingChartView(context: android.content.Context) : View(context) {
         invalidate()
     }
 
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        scaleDetector.onTouchEvent(event)
+
+        if (candles.isEmpty()) return true
+
+        val left = 8f
+        val right = width - 96f
+        val chartWidth = (right - left).coerceAtLeast(1f)
+
+        when (event.actionMasked) {
+
+            MotionEvent.ACTION_DOWN -> {
+                lastTouchX = event.x
+                crosshairIndex = indexForX(event.x, left, chartWidth)
+                invalidate()
+                return true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                if (scaleDetector.isInProgress || event.pointerCount > 1) {
+                    return true
+                }
+
+                val dx = event.x - lastTouchX
+
+                if (kotlin.math.abs(dx) >= 4f) {
+                    val slot = chartWidth / visibleCount.toFloat()
+
+                    if (slot > 0f) {
+                        val candleShift = (-dx / slot).toInt()
+
+                        if (candleShift != 0) {
+                            endIndex = (
+                                endIndex + candleShift
+                            ).coerceIn(
+                                visibleCount - 1,
+                                candles.lastIndex
+                            )
+
+                            lastTouchX += candleShift * -slot
+                        }
+                    }
+
+                    crosshairIndex = indexForX(event.x, left, chartWidth)
+                    invalidate()
+                }
+
+                return true
+            }
+
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_CANCEL -> {
+                crosshairIndex = indexForX(event.x, left, chartWidth)
+                invalidate()
+                return true
+            }
+        }
+
+        return true
+    }
+
+    private fun indexForX(
+        x: Float,
+        left: Float,
+        chartWidth: Float
+    ): Int {
+        if (candles.isEmpty()) return -1
+
+        val count =
+            visibleCount.coerceIn(
+                1,
+                candles.size
+            )
+
+        val startIndex =
+            (endIndex - count + 1)
+                .coerceAtLeast(0)
+
+        val slot =
+            chartWidth / count.toFloat()
+
+        val localIndex =
+            ((x - left) / slot)
+                .toInt()
+                .coerceIn(
+                    0,
+                    count - 1
+                )
+
+        return (
+            startIndex + localIndex
+        ).coerceIn(
+            0,
+            candles.lastIndex
+        )
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawColor(CHART_BG)
 
         if (candles.isEmpty()) {
             textPaint.textAlign = Paint.Align.CENTER
-            canvas.drawText("Loading chart…", width / 2f, height / 2f, textPaint)
+            canvas.drawText(
+                "Loading chart…",
+                width / 2f,
+                height / 2f,
+                textPaint
+            )
             return
         }
 
@@ -914,94 +1315,409 @@ class TradingChartView(context: android.content.Context) : View(context) {
         val top = 12f
         val bottom = height - bottomMargin
 
-        var minPrice = candles.minOf { it.low }
-        var maxPrice = candles.maxOf { it.high }
-        (ema20 + ema50).forEach { v ->
-            if (v > 0f) {
-                if (v < minPrice) minPrice = v
-                if (v > maxPrice) maxPrice = v
+        val count =
+            visibleCount.coerceIn(
+                1,
+                candles.size
+            )
+
+        val startIndex =
+            (endIndex - count + 1)
+                .coerceAtLeast(0)
+
+        val endVisible =
+            (startIndex + count - 1)
+                .coerceAtMost(candles.lastIndex)
+
+        val visibleCandles =
+            candles.subList(
+                startIndex,
+                endVisible + 1
+            )
+
+        var minPrice =
+            visibleCandles.minOf { it.low }
+
+        var maxPrice =
+            visibleCandles.maxOf { it.high }
+
+        ema20
+            .drop(startIndex)
+            .take(visibleCandles.size)
+            .forEach { value ->
+                if (value > 0f) {
+                    minPrice = minOf(minPrice, value)
+                    maxPrice = maxOf(maxPrice, value)
+                }
             }
-        }
+
+        ema50
+            .drop(startIndex)
+            .take(visibleCandles.size)
+            .forEach { value ->
+                if (value > 0f) {
+                    minPrice = minOf(minPrice, value)
+                    maxPrice = maxOf(maxPrice, value)
+                }
+            }
+
         latestPrice?.let {
-            if (it < minPrice) minPrice = it
-            if (it > maxPrice) maxPrice = it
+            minPrice = minOf(minPrice, it)
+            maxPrice = maxOf(maxPrice, it)
         }
-        val padding = (maxPrice - minPrice) * 0.08f
+
+        val padding =
+            ((maxPrice - minPrice) * 0.08f)
+                .coerceAtLeast(0.5f)
+
         minPrice -= padding
         maxPrice += padding
-        val range = (maxPrice - minPrice).coerceAtLeast(0.01f)
 
-        fun priceY(price: Float): Float = bottom - (price - minPrice) / range * (bottom - top)
+        val range =
+            (maxPrice - minPrice)
+                .coerceAtLeast(0.01f)
 
-        // Grid + right-side price scale
+        fun priceY(price: Float): Float =
+            bottom -
+                (price - minPrice) /
+                range *
+                (bottom - top)
+
+        // Grid.
+        paint.style = Paint.Style.STROKE
         paint.color = CHART_GRID
         paint.strokeWidth = 1f
+
+        textPaint.color = AXIS_TEXT_COLOR
         textPaint.textAlign = Paint.Align.LEFT
-        val gridLines = 4
-        for (i in 0..gridLines) {
-            val y = top + (bottom - top) * i / gridLines
-            canvas.drawLine(left, y, right, y, paint)
-            val price = maxPrice - (maxPrice - minPrice) * i / gridLines
-            canvas.drawText(String.format(Locale.US, "%,.2f", price), right + 8f, y + 9f, textPaint)
+
+        for (i in 0..4) {
+            val y =
+                top +
+                (bottom - top) *
+                i / 4f
+
+            canvas.drawLine(
+                left,
+                y,
+                right,
+                y,
+                paint
+            )
+
+            val price =
+                maxPrice -
+                (maxPrice - minPrice) *
+                i / 4f
+
+            canvas.drawText(
+                String.format(
+                    Locale.US,
+                    "%,.2f",
+                    price
+                ),
+                right + 8f,
+                y + 9f,
+                textPaint
+            )
         }
 
-        // Candles
-        val slot = (right - left) / candles.size
-        val bodyWidth = (slot * 0.6f).coerceAtLeast(2f)
+        val slot =
+            (right - left) /
+            visibleCandles.size.toFloat()
 
-        candles.forEachIndexed { index, candle ->
-            val x = left + slot * index + slot / 2f
-            val bullish = candle.close >= candle.open
+        val bodyWidth =
+            (slot * 0.6f)
+                .coerceAtLeast(2f)
 
-            paint.color = if (bullish) BULLISH_COLOR else BEARISH_COLOR
+        // Candles.
+        visibleCandles.forEachIndexed { index, candle ->
+
+            val x =
+                left +
+                slot * index +
+                slot / 2f
+
+            val bullish =
+                candle.close >= candle.open
+
+            paint.color =
+                if (bullish)
+                    BULLISH_COLOR
+                else
+                    BEARISH_COLOR
+
+            paint.style = Paint.Style.STROKE
             paint.strokeWidth = 2f
-            canvas.drawLine(x, priceY(candle.high), x, priceY(candle.low), paint)
 
-            val bodyTop = priceY(maxOf(candle.open, candle.close))
-            val bodyBottom = priceY(minOf(candle.open, candle.close))
+            canvas.drawLine(
+                x,
+                priceY(candle.high),
+                x,
+                priceY(candle.low),
+                paint
+            )
+
             paint.style = Paint.Style.FILL
+
+            val bodyTop =
+                priceY(
+                    maxOf(
+                        candle.open,
+                        candle.close
+                    )
+                )
+
+            val bodyBottom =
+                priceY(
+                    minOf(
+                        candle.open,
+                        candle.close
+                    )
+                )
+
             canvas.drawRect(
                 x - bodyWidth / 2f,
                 bodyTop,
                 x + bodyWidth / 2f,
-                maxOf(bodyBottom, bodyTop + 2f),
+                maxOf(
+                    bodyBottom,
+                    bodyTop + 2f
+                ),
                 paint
             )
         }
 
-        // EMA lines
-        drawEmaLine(canvas, ema20, slot, left, ::priceY, EMA20_COLOR)
-        drawEmaLine(canvas, ema50, slot, left, ::priceY, EMA50_COLOR)
+        // EMA20.
+        drawEmaLine(
+            canvas,
+            ema20.drop(startIndex).take(visibleCandles.size),
+            slot,
+            left,
+            ::priceY,
+            EMA20_COLOR
+        )
 
-        // Latest price dashed line + tag
+        // EMA50.
+        drawEmaLine(
+            canvas,
+            ema50.drop(startIndex).take(visibleCandles.size),
+            slot,
+            left,
+            ::priceY,
+            EMA50_COLOR
+        )
+
+        // Live price.
         latestPrice?.let { price ->
+
             val y = priceY(price)
-            dashedPaint.color = PRICE_LINE_COLOR
-            canvas.drawLine(left, y, right, y, dashedPaint)
+
+            dashedPaint.color =
+                PRICE_LINE_COLOR
+
+            canvas.drawLine(
+                left,
+                y,
+                right,
+                y,
+                dashedPaint
+            )
 
             paint.style = Paint.Style.FILL
-            paint.color = PRICE_LINE_COLOR
-            canvas.drawRect(right, y - 16f, width.toFloat(), y + 16f, paint)
+            paint.color =
+                PRICE_LINE_COLOR
+
+            canvas.drawRect(
+                right,
+                y - 16f,
+                width.toFloat(),
+                y + 16f,
+                paint
+            )
 
             textPaint.color = Color.BLACK
-            textPaint.textAlign = Paint.Align.LEFT
-            canvas.drawText(String.format(Locale.US, "%,.2f", price), right + 8f, y + 9f, textPaint)
-            textPaint.color = AXIS_TEXT_COLOR
+            textPaint.textAlign =
+                Paint.Align.LEFT
+
+            canvas.drawText(
+                String.format(
+                    Locale.US,
+                    "%,.2f",
+                    price
+                ),
+                right + 8f,
+                y + 9f,
+                textPaint
+            )
+
+            textPaint.color =
+                AXIS_TEXT_COLOR
         }
 
-        // Time labels along the bottom (evenly spaced)
-        textPaint.textAlign = Paint.Align.CENTER
-        val labelCount = 5.coerceAtMost(candles.size)
-        if (labelCount > 0) {
-            for (i in 0 until labelCount) {
-                val index = if (labelCount == 1) 0 else i * (candles.size - 1) / (labelCount - 1)
-                val x = left + slot * index + slot / 2f
-                val timestamp = candles[index].timestamp * 1000L
-                val text = if (isDaily) dailyFormat.format(Date(timestamp)) else intradayFormat.format(Date(timestamp))
-                canvas.drawText(text, x, height - 8f, textPaint)
-            }
+        // Time labels.
+        textPaint.textAlign =
+            Paint.Align.CENTER
+
+        val labelCount =
+            minOf(5, visibleCandles.size)
+
+        for (i in 0 until labelCount) {
+
+            val localIndex =
+                if (labelCount == 1)
+                    0
+                else
+                    i *
+                    (visibleCandles.size - 1) /
+                    (labelCount - 1)
+
+            val x =
+                left +
+                slot * localIndex +
+                slot / 2f
+
+            val timestamp =
+                visibleCandles[localIndex]
+                    .timestamp * 1000L
+
+            val label =
+                if (isDaily)
+                    dailyFormat.format(Date(timestamp))
+                else
+                    intradayFormat.format(Date(timestamp))
+
+            canvas.drawText(
+                label,
+                x,
+                height - 8f,
+                textPaint
+            )
+        }
+
+        // Crosshair.
+        if (
+            crosshairIndex in
+            startIndex..endVisible
+        ) {
+            val localIndex =
+                crosshairIndex - startIndex
+
+            val candle =
+                candles[crosshairIndex]
+
+            val x =
+                left +
+                slot * localIndex +
+                slot / 2f
+
+            val y =
+                priceY(candle.close)
+
+            crosshairPaint.color =
+                AXIS_TEXT_COLOR
+
+            canvas.drawLine(
+                x,
+                top,
+                x,
+                bottom,
+                crosshairPaint
+            )
+
+            canvas.drawLine(
+                left,
+                y,
+                right,
+                y,
+                crosshairPaint
+            )
+
+            // Crosshair price tag.
+            paint.style = Paint.Style.FILL
+            paint.color =
+                AXIS_TEXT_COLOR
+
+            canvas.drawRect(
+                right,
+                y - 16f,
+                width.toFloat(),
+                y + 16f,
+                paint
+            )
+
+            textPaint.color = Color.BLACK
+            textPaint.textAlign =
+                Paint.Align.LEFT
+
+            canvas.drawText(
+                String.format(
+                    Locale.US,
+                    "%.2f",
+                    candle.close
+                ),
+                right + 8f,
+                y + 7f,
+                textPaint
+            )
+
+            // OHLC information.
+            val timestamp =
+                candle.timestamp * 1000L
+
+            val time =
+                if (isDaily)
+                    dailyFormat.format(Date(timestamp))
+                else
+                    intradayFormat.format(Date(timestamp))
+
+            val info =
+                "$time  O ${price(candle.open)}  " +
+                "H ${price(candle.high)}  " +
+                "L ${price(candle.low)}  " +
+                "C ${price(candle.close)}"
+
+            val boxLeft = 12f
+            val boxTop = top + 8f
+            val boxRight =
+                minOf(
+                    right - 4f,
+                    boxLeft + 510f
+                )
+            val boxBottom =
+                boxTop + 40f
+
+            infoPaint.color =
+                0xEE151A21.toInt()
+
+            canvas.drawRoundRect(
+                boxLeft,
+                boxTop,
+                boxRight,
+                boxBottom,
+                8f,
+                8f,
+                infoPaint
+            )
+
+            infoTextPaint.color =
+                Color.WHITE
+
+            canvas.drawText(
+                info,
+                boxLeft + 10f,
+                boxTop + 26f,
+                infoTextPaint
+            )
         }
     }
+
+    private fun price(value: Float): String =
+        String.format(
+            Locale.US,
+            "%.2f",
+            value
+        )
 
     private fun drawEmaLine(
         canvas: Canvas,
@@ -1012,16 +1728,30 @@ class TradingChartView(context: android.content.Context) : View(context) {
         color: Int
     ) {
         if (values.size < 2) return
+
         paint.style = Paint.Style.STROKE
         paint.strokeWidth = 3f
         paint.color = color
 
         val path = Path()
+
         values.forEachIndexed { index, value ->
-            val x = left + slot * index + slot / 2f
+
+            if (value <= 0f) return@forEachIndexed
+
+            val x =
+                left +
+                slot * index +
+                slot / 2f
+
             val y = priceY(value)
-            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+
+            if (index == 0)
+                path.moveTo(x, y)
+            else
+                path.lineTo(x, y)
         }
+
         canvas.drawPath(path, paint)
     }
 }
