@@ -66,7 +66,7 @@ class MainActivity : Activity() {
     companion object {
         private const val BACKEND_HTTP_BASE = "https://algotrader-backend-kras.onrender.com"
         private const val BACKEND_WS_URL = "wss://algotrader-backend-kras.onrender.com/ws/quotes"
-        private val TIMEFRAMES = listOf("1m", "5m", "15m", "30m", "1h", "1D")
+        private val TIMEFRAMES = listOf("5m", "15m", "30m", "1h", "1D")
     }
 
     private lateinit var content: LinearLayout
@@ -114,7 +114,6 @@ class MainActivity : Activity() {
 
     private fun timeframeResolution(): String {
         return when (selectedTimeframe) {
-            "1m" -> "1"
             "5m" -> "5"
             "15m" -> "15"
             "30m" -> "30"
@@ -816,7 +815,6 @@ private fun runBacktest() {
                     exchange = selectedInstrument.backendSymbol.substringBefore(":")
                 ),
                 timeframe = when (selectedTimeframe) {
-                    "1m" -> com.algotrader.domain.Timeframe.MINUTE_1
                     "5m" -> com.algotrader.domain.Timeframe.MINUTE_5
                     "15m" -> com.algotrader.domain.Timeframe.MINUTE_15
                     "30m" -> com.algotrader.domain.Timeframe.MINUTE_30
