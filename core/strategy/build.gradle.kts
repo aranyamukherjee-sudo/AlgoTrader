@@ -8,4 +8,9 @@ kotlin {
 
 dependencies {
     implementation(project(":core:domain"))
+    testImplementation(kotlin("test-junit5"))
+}
+
+tasks.test {
+    useJUnitPlatform()
 }

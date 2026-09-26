@@ -1,5 +1,16 @@
 package com.algotrader.strategy
 
+import com.algotrader.strategy.indicator.sma
+
+/**
+ * Classic fast/slow simple-moving-average crossover.
+ *
+ * Entry (long): the fast SMA crosses from at-or-below the slow SMA to above it.
+ * Exit (flat): the fast SMA crosses from at-or-above the slow SMA to below it.
+ *
+ * This strategy is long-only: a bearish crossover flattens an open long but
+ * never opens a short.
+ */
 class MovingAverageCrossoverStrategy(
     private val fastPeriod: Int = 5,
     private val slowPeriod: Int = 10
@@ -14,21 +25,32 @@ class MovingAverageCrossoverStrategy(
 
     override val name: String = "Moving Average Crossover"
 
+    override val metadata = StrategyMetadata(
+        description = "Goes long when the fast SMA($fastPeriod) crosses above the " +
+            "slow SMA($slowPeriod), and exits when it crosses back below.",
+        requiredIndicators = listOf("SMA($fastPeriod)", "SMA($slowPeriod)"),
+        parameters = listOf(
+            StrategyParameter("fastPeriod", fastPeriod.toDouble()),
+            StrategyParameter("slowPeriod", slowPeriod.toDouble())
+        ),
+        direction = PositionDirection.LONG_ONLY,
+        entryRule = "Fast SMA crosses above slow SMA",
+        exitRule = "Fast SMA crosses below slow SMA"
+    )
+
     override fun evaluate(context: StrategyContext): List<Signal> {
         val candles = context.candles.sortedBy { it.timestamp }
+        if (candles.size < slowPeriod + 1) return emptyList()
 
-        if (candles.size < slowPeriod + 1) {
-            return emptyList()
-        }
+        val closes = candles.map { it.close }
+        val fast = sma(closes, fastPeriod)
+        val slow = sma(closes, slowPeriod)
 
-        val previousCandles = candles.dropLast(1)
-        val currentCandle = candles.last()
-
-        val previousFast = averageClose(previousCandles.takeLast(fastPeriod))
-        val previousSlow = averageClose(previousCandles.takeLast(slowPeriod))
-
-        val currentFast = averageClose(candles.takeLast(fastPeriod))
-        val currentSlow = averageClose(candles.takeLast(slowPeriod))
+        val last = candles.lastIndex
+        val previousFast = fast[last - 1] ?: return emptyList()
+        val previousSlow = slow[last - 1] ?: return emptyList()
+        val currentFast = fast[last] ?: return emptyList()
+        val currentSlow = slow[last] ?: return emptyList()
 
         val signalType = when {
             previousFast <= previousSlow && currentFast > currentSlow ->
@@ -41,21 +63,16 @@ class MovingAverageCrossoverStrategy(
                 SignalType.HOLD
         }
 
+        val currentCandle = candles[last]
         return listOf(
             Signal(
                 instrument = currentCandle.instrument,
                 type = signalType,
                 timestamp = currentCandle.timestamp,
                 confidence = confidence(currentFast, currentSlow),
-                reason = "Fast MA=$currentFast, Slow MA=$currentSlow"
+                reason = "Fast SMA=$currentFast, Slow SMA=$currentSlow"
             )
         )
-    }
-
-    private fun averageClose(
-        candles: List<com.algotrader.domain.Candle>
-    ): Double {
-        return candles.map { it.close }.average()
     }
 
     private fun confidence(
