@@ -26,6 +26,25 @@ history_client = None
 fyers_status = "not_configured"
 last_fyers_error = None
 
+# Historical candle cache.
+#
+# Key:
+#   (symbol, resolution, days)
+#
+# Value:
+#   {
+#       "timestamp": <unix timestamp>,
+#       "data": <successful /history response>
+#   }
+#
+# The cache is intentionally in-memory for Stage 1.
+# Render restarts/redeploys will clear it, which is acceptable.
+history_cache = {}
+history_cache_lock = threading.Lock()
+
+# Refresh cached historical data after 5 minutes.
+HISTORY_CACHE_TTL = 5 * 60
+
 
 def refresh_access_token():
     global last_fyers_error
@@ -225,7 +244,12 @@ def history(
             "message": "Unsupported symbol",
         }
 
-    if resolution not in {"1", "3", "5", "15", "30", "60", "D"}:
+    # Supported app resolutions:
+    # 5m / 15m / 30m / 1h / 1D
+    #
+    # FYERS resolution values:
+    # 5 / 15 / 30 / 60 / D
+    if resolution not in {"5", "15", "30", "60", "D"}:
         return {
             "status": "error",
             "message": "Unsupported resolution",
@@ -239,8 +263,46 @@ def history(
 
     days = max(1, min(days, 365))
 
-    # FYERS can limit the amount of intraday history returned by a
-    # single request. Request the complete period in smaller chunks.
+    # --------------------------------------------------------
+    # Backend historical cache
+    # --------------------------------------------------------
+
+    cache_key = (symbol, resolution, days)
+    now = time.time()
+
+    with history_cache_lock:
+        cached = history_cache.get(cache_key)
+
+    if cached:
+        cache_age = now - cached["timestamp"]
+
+        if cache_age < HISTORY_CACHE_TTL:
+            print(
+                f"[history-cache] HIT "
+                f"symbol={symbol} resolution={resolution} "
+                f"days={days} age={cache_age:.1f}s",
+                flush=True,
+            )
+
+            return cached["data"]
+
+        print(
+            f"[history-cache] EXPIRED "
+            f"symbol={symbol} resolution={resolution} "
+            f"days={days} age={cache_age:.1f}s",
+            flush=True,
+        )
+    else:
+        print(
+            f"[history-cache] MISS "
+            f"symbol={symbol} resolution={resolution} days={days}",
+            flush=True,
+        )
+
+    # --------------------------------------------------------
+    # FYERS historical-data chunking
+    # --------------------------------------------------------
+
     if resolution == "D":
         chunk_days = 365
     elif resolution == "60":
@@ -249,12 +311,8 @@ def history(
         chunk_days = 15
     elif resolution == "15":
         chunk_days = 10
-    elif resolution == "5":
+    else:  # 5 minute
         chunk_days = 5
-    elif resolution == "3":
-        chunk_days = 3
-    else:  # 1 minute
-        chunk_days = 1
 
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
@@ -279,6 +337,14 @@ def history(
                 "cont_flag": "1",
             }
 
+            print(
+                f"[history-cache] FYERS fetch "
+                f"symbol={symbol} resolution={resolution} "
+                f"from={data['range_from']} "
+                f"to={data['range_to']}",
+                flush=True,
+            )
+
             response = history_client.history(data=data)
 
             if response.get("s") != "ok":
@@ -302,13 +368,32 @@ def history(
             for timestamp in sorted(all_candles)
         ]
 
-        return {
+        result = {
             "status": "ok",
             "symbol": symbol,
             "resolution": resolution,
             "days": days,
             "candles": candles,
         }
+
+        # ----------------------------------------------------
+        # Store only successful responses in cache.
+        # ----------------------------------------------------
+
+        with history_cache_lock:
+            history_cache[cache_key] = {
+                "timestamp": time.time(),
+                "data": result,
+            }
+
+        print(
+            f"[history-cache] STORED "
+            f"symbol={symbol} resolution={resolution} "
+            f"days={days} candles={len(candles)}",
+            flush=True,
+        )
+
+        return result
 
     except Exception as error:
         return {
