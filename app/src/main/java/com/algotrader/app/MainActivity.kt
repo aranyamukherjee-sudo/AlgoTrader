@@ -40,6 +40,7 @@ import com.algotrader.backtest.PositionSizing
 import com.algotrader.strategy.CprEmaTrendStrategy
 import com.algotrader.strategy.DonchianEmaTrendStrategy
 import com.algotrader.app.ui.screens.MarketDataScreen
+import com.algotrader.app.ui.screens.ExecutionScreen
 /**
  * Real-time candle for the selected instrument/timeframe.
  * All values come from the AlgoTrader backend (FYERS-backed) — never fabricated.
@@ -995,15 +996,7 @@ class MainActivity : Activity() {
 
     private fun showExecution() {
         clearContent()
-
-        content.addView(title("Execution"))
-
-        content.addView(section("Trading Mode"))
-        content.addView(label("PAPER TRADING"))
-        content.addView(label("Status: STANDBY"))
-
-        content.addView(section("Broker Connection"))
-        content.addView(label("Not connected"))
+        ExecutionScreen.render(this, content)
     }
 
     
