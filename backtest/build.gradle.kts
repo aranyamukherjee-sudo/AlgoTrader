@@ -12,4 +12,9 @@ dependencies {
     implementation(project(":core:marketdata"))
     implementation(project(":core:execution"))
     implementation(project(":strategy-engine"))
+    testImplementation(kotlin("test-junit5"))
+}
+
+tasks.test {
+    useJUnitPlatform()
 }

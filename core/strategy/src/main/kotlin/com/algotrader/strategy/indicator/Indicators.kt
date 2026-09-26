@@ -1,5 +1,9 @@
 package com.algotrader.strategy.indicator
 
+import com.algotrader.domain.Candle
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZoneOffset
 import kotlin.math.sqrt
 
 /**
@@ -194,4 +198,72 @@ fun donchianChannel(
     }
 
     return DonchianChannel(upper, lower, middle)
+}
+
+data class CentralPivotRange(
+    val pivot: Double,
+    val topCentral: Double,
+    val bottomCentral: Double
+)
+
+/**
+ * Central Pivot Range (CPR) from a single prior period's OHLC (e.g. the
+ * previous day's high/low/close). This is the stateless formula; see
+ * [dailyCentralPivotRange] to align it to a series of candles day by day.
+ */
+fun centralPivotRange(
+    previousHigh: Double,
+    previousLow: Double,
+    previousClose: Double
+): CentralPivotRange {
+    val pivot = (previousHigh + previousLow + previousClose) / 3.0
+    val bottomCentral = (previousHigh + previousLow) / 2.0
+    val topCentral = 2.0 * pivot - bottomCentral
+    return CentralPivotRange(pivot, topCentral, bottomCentral)
+}
+
+/**
+ * Daily CPR aligned to a series of (typically intraday) candles: every
+ * candle on a given calendar day is assigned the CPR computed from the
+ * *previous* calendar day's high/low/close — the standard convention, since
+ * CPR is meant to describe today's key levels using yesterday's range.
+ * Candles on the first day present have no prior day to compute from, so
+ * their entry is null.
+ *
+ * Unlike the other indicators in this file, this takes [Candle]s directly
+ * (rather than a plain price list) because it needs each candle's
+ * timestamp to group them by day. [candles] must already be in
+ * chronological order, as with every other function here.
+ */
+fun dailyCentralPivotRange(
+    candles: List<Candle>,
+    zone: ZoneId = ZoneOffset.UTC
+): List<CentralPivotRange?> {
+    if (candles.isEmpty()) return emptyList()
+
+    data class DayAggregate(var high: Double, var low: Double, var close: Double)
+
+    val byDay = LinkedHashMap<LocalDate, DayAggregate>()
+    for (candle in candles) {
+        val day = candle.timestamp.atZone(zone).toLocalDate()
+        val existing = byDay[day]
+        if (existing == null) {
+            byDay[day] = DayAggregate(candle.high, candle.low, candle.close)
+        } else {
+            existing.high = maxOf(existing.high, candle.high)
+            existing.low = minOf(existing.low, candle.low)
+            existing.close = candle.close // candles are chronological, so the last write wins
+        }
+    }
+
+    val days = byDay.keys.toList()
+    val cprByDay = HashMap<LocalDate, CentralPivotRange>()
+    for (i in 1 until days.size) {
+        val previous = byDay.getValue(days[i - 1])
+        cprByDay[days[i]] = centralPivotRange(previous.high, previous.low, previous.close)
+    }
+
+    return candles.map { candle ->
+        cprByDay[candle.timestamp.atZone(zone).toLocalDate()]
+    }
 }
