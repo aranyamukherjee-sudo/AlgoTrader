@@ -19,16 +19,19 @@ import android.widget.Toast
 import android.app.Activity
 import android.os.Handler
 import android.os.Looper
+import org.json.JSONArray
 import org.json.JSONObject
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.Executors
 
 import com.algotrader.backtest.BacktestConfig
 import com.algotrader.backtest.BacktestEngine
@@ -67,6 +70,13 @@ class MainActivity : Activity() {
         private const val BACKEND_HTTP_BASE = "https://algotrader-backend-kras.onrender.com"
         private const val BACKEND_WS_URL = "wss://algotrader-backend-kras.onrender.com/ws/quotes"
         private val TIMEFRAMES = listOf("5m", "15m", "30m", "1h", "1D")
+
+        // Persistent historical-candle disk cache.
+        private const val HISTORY_CACHE_SCHEMA_VERSION = 1
+        private const val HISTORY_CACHE_DIR_NAME = "history_cache"
+        // Mirrors the backend's own /history cache TTL, so we don't refresh
+        // more often than the backend data could actually change.
+        private const val DISK_CACHE_TTL_MS = 5 * 60 * 1000L
     }
 
     private lateinit var content: LinearLayout
@@ -80,6 +90,10 @@ class MainActivity : Activity() {
         .callTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
         .build()
     private var quotesWebSocket: WebSocket? = null
+
+    // Single background thread for all disk cache reads/writes: keeps file
+    // access off the main thread and serializes writes to the same key.
+    private val diskCacheExecutor = Executors.newSingleThreadExecutor()
 
     // ---- Home / trading workspace state ----
     private var selectedInstrument: InstrumentInfo = Instruments.NIFTY
@@ -119,18 +133,27 @@ class MainActivity : Activity() {
             "30m" -> "30"
             "1h" -> "60"
             "1D" -> "D"
-            else -> "1"
+            else -> error("Unsupported timeframe: $selectedTimeframe")
         }
     }
 
-    /** Loads history for the currently selected instrument + timeframe from the backend. */
+    /**
+     * Loads history for the currently selected instrument + timeframe.
+     *
+     * Lookup order:
+     *   1. In-memory cache (instant, no I/O)
+     *   2. On-disk cache (fast, off-thread) — rendered immediately if present;
+     *      if it's younger than [DISK_CACHE_TTL_MS] we stop there, otherwise
+     *      we also kick a silent background refresh from the backend.
+     *   3. Backend "/history" (cold miss — shows the normal loading status).
+     */
     private fun loadHistoryForSelected() {
         val instrument = selectedInstrument
         val requestedSymbol = instrument.backendSymbol
         val requestedTimeframe = selectedTimeframe
         val cacheKey = "$requestedSymbol|$requestedTimeframe"
 
-        // Use already-loaded historical data immediately.
+        // 1) Memory cache — unchanged fast path.
         candlesByInstrument[cacheKey]?.let { cached ->
             if (cached.isNotEmpty()) {
                 setHeaderStatus(null)
@@ -139,9 +162,67 @@ class MainActivity : Activity() {
             }
         }
 
+        // 2) Disk cache — read off the main thread.
+        diskCacheExecutor.execute {
+            val diskEntry = readDiskCache(requestedSymbol, requestedTimeframe)
+
+            runOnUiThread {
+                if (!isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
+                    return@runOnUiThread
+                }
+
+                if (diskEntry != null) {
+                    // Populate the memory cache too, so switching away and
+                    // back is instant without touching disk again.
+                    candlesByInstrument[cacheKey] = diskEntry.candles
+                    setHeaderStatus(null)
+                    renderHomeData(diskEntry.candles)
+
+                    val age = System.currentTimeMillis() - diskEntry.savedAt
+                    if (age >= DISK_CACHE_TTL_MS) {
+                        // Stale: refresh quietly, chart already showing data.
+                        fetchHistoryFromBackend(
+                            instrument = instrument,
+                            requestedSymbol = requestedSymbol,
+                            requestedTimeframe = requestedTimeframe,
+                            cacheKey = cacheKey,
+                            showLoadingStatus = false
+                        )
+                    }
+                    // else: fresh enough — no network request at all.
+                } else {
+                    // 3) True cold miss (no memory, no valid disk cache).
+                    fetchHistoryFromBackend(
+                        instrument = instrument,
+                        requestedSymbol = requestedSymbol,
+                        requestedTimeframe = requestedTimeframe,
+                        cacheKey = cacheKey,
+                        showLoadingStatus = true
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Fetches history from the backend "/history" endpoint. On success,
+     * updates the in-memory cache, overwrites the on-disk cache, and
+     * re-renders the chart. On failure, leaves whatever is already on
+     * screen untouched and only surfaces the existing non-blocking status
+     * message.
+     */
+    private fun fetchHistoryFromBackend(
+        instrument: InstrumentInfo,
+        requestedSymbol: String,
+        requestedTimeframe: String,
+        cacheKey: String,
+        showLoadingStatus: Boolean
+    ) {
         val resolution = timeframeResolution()
 
-        setHeaderStatus("Loading ${instrument.displayName}…")
+        if (showLoadingStatus) {
+            setHeaderStatus("Loading ${instrument.displayName}…")
+        }
 
         val historyDays = 365
         val request = Request.Builder()
@@ -156,6 +237,8 @@ class MainActivity : Activity() {
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                 runOnUiThread {
                     if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
+                        // Cached chart (memory or disk), if any, stays visible;
+                        // this just surfaces the error non-blockingly.
                         setHeaderStatus(
                             "Network error: ${e.javaClass.simpleName} — ${e.message ?: "unknown"}"
                         )
@@ -219,8 +302,14 @@ class MainActivity : Activity() {
                             return
                         }
 
-                        // Cache by both instrument and timeframe.
+                        // Cache by both instrument and timeframe (memory).
                         candlesByInstrument[cacheKey] = candles
+
+                        // Persist to disk, atomically, off the main thread.
+                        val savedAt = System.currentTimeMillis()
+                        diskCacheExecutor.execute {
+                            writeDiskCache(requestedSymbol, requestedTimeframe, candles, savedAt)
+                        }
 
                         runOnUiThread {
                             if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
@@ -239,6 +328,143 @@ class MainActivity : Activity() {
                 }
             }
         })
+    }
+
+    // ---------------------------------------------------------------------
+    // Persistent (disk) historical candle cache
+    // ---------------------------------------------------------------------
+
+    private data class DiskCacheEntry(val savedAt: Long, val candles: List<Candle>)
+
+    private fun historyCacheDir(): File {
+        val dir = File(filesDir, HISTORY_CACHE_DIR_NAME)
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun historyCacheFile(symbol: String, timeframe: String): File {
+        // Sanitize so ":" and other symbol characters can never break the path.
+        val safeName = "${symbol}_$timeframe".replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        return File(historyCacheDir(), "$safeName.json")
+    }
+
+    /**
+     * Reads and validates one disk cache entry. Any missing file, unreadable
+     * file, JSON parse failure, or schema/symbol/timeframe mismatch is
+     * treated as a plain cache miss (returns null) and the bad file is
+     * deleted so it can't keep failing on every future load.
+     *
+     * Must be called on [diskCacheExecutor], never the main thread.
+     */
+    private fun readDiskCache(symbol: String, timeframe: String): DiskCacheEntry? {
+        val file = historyCacheFile(symbol, timeframe)
+        if (!file.exists()) return null
+
+        return try {
+            val root = JSONObject(file.readText())
+
+            val schemaVersion = root.optInt("schemaVersion", -1)
+            val cachedSymbol = root.optString("symbol", "")
+            val cachedTimeframe = root.optString("timeframe", "")
+
+            if (schemaVersion != HISTORY_CACHE_SCHEMA_VERSION ||
+                cachedSymbol != symbol ||
+                cachedTimeframe != timeframe
+            ) {
+                file.delete()
+                return null
+            }
+
+            val savedAt = root.optLong("savedAt", -1L)
+            val array = root.optJSONArray("candles")
+
+            if (savedAt <= 0L || array == null || array.length() == 0) {
+                file.delete()
+                return null
+            }
+
+            val candles = mutableListOf<Candle>()
+            for (i in 0 until array.length()) {
+                val candle = array.optJSONArray(i) ?: continue
+                if (candle.length() >= 5) {
+                    candles.add(
+                        Candle(
+                            timestamp = candle.optLong(0),
+                            open = candle.optDouble(1).toFloat(),
+                            high = candle.optDouble(2).toFloat(),
+                            low = candle.optDouble(3).toFloat(),
+                            close = candle.optDouble(4).toFloat(),
+                            volume = if (candle.length() >= 6) {
+                                candle.optDouble(5, 0.0).toFloat()
+                            } else 0f
+                        )
+                    )
+                }
+            }
+
+            if (candles.isEmpty()) {
+                file.delete()
+                return null
+            }
+
+            DiskCacheEntry(savedAt, candles)
+        } catch (e: Exception) {
+            // Corrupt or unreadable — clear it and behave like a cache miss.
+            file.delete()
+            null
+        }
+    }
+
+    /**
+     * Writes one disk cache entry atomically: the full content is written to
+     * a ".tmp" file first, then renamed over the real file. A crash or kill
+     * mid-write can therefore never leave a partially-written, corrupt cache
+     * file behind — readers only ever see a complete previous version or a
+     * complete new one.
+     *
+     * Must be called on [diskCacheExecutor], never the main thread.
+     */
+    private fun writeDiskCache(
+        symbol: String,
+        timeframe: String,
+        candles: List<Candle>,
+        savedAt: Long
+    ) {
+        try {
+            val finalFile = historyCacheFile(symbol, timeframe)
+            val tmpFile = File(finalFile.parentFile, "${finalFile.name}.tmp")
+
+            val candleArray = JSONArray()
+            candles.forEach { candle ->
+                val row = JSONArray()
+                row.put(candle.timestamp)
+                row.put(candle.open)
+                row.put(candle.high)
+                row.put(candle.low)
+                row.put(candle.close)
+                row.put(candle.volume)
+                candleArray.put(row)
+            }
+
+            val root = JSONObject()
+            root.put("schemaVersion", HISTORY_CACHE_SCHEMA_VERSION)
+            root.put("symbol", symbol)
+            root.put("timeframe", timeframe)
+            root.put("savedAt", savedAt)
+            root.put("candles", candleArray)
+
+            tmpFile.writeText(root.toString())
+
+            if (!tmpFile.renameTo(finalFile)) {
+                // Some filesystems refuse to rename over an existing target;
+                // fall back to delete-then-rename (still single-writer safe).
+                finalFile.delete()
+                tmpFile.renameTo(finalFile)
+            }
+        } catch (e: Exception) {
+            // Best-effort cache: a failed write just means the next load
+            // falls back to the backend, nothing else is affected.
+        }
     }
 
     private fun isStillCurrentSelection(symbol: String, timeframe: String): Boolean {
@@ -316,6 +542,7 @@ class MainActivity : Activity() {
         super.onDestroy()
         quotesWebSocket?.close(1000, "Activity destroyed")
         liveHandler.removeCallbacksAndMessages(null)
+        diskCacheExecutor.shutdown()
     }
 
     private fun buildApp() {
