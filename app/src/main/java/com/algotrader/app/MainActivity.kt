@@ -73,7 +73,12 @@ class MainActivity : Activity() {
     private lateinit var bottomNav: LinearLayout
 
     private val liveHandler = Handler(Looper.getMainLooper())
-    private val wsClient = OkHttpClient()
+    private val wsClient = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
     private var quotesWebSocket: WebSocket? = null
 
     // ---- Home / trading workspace state ----
@@ -81,7 +86,8 @@ class MainActivity : Activity() {
     private var selectedTimeframe = "5m"
     private var isHomeScreenActive = false
 
-    // Last candles loaded per backend symbol (independent of which screen is visible).
+    // Historical candles cached by backend symbol + timeframe.
+    // Example key: "NSE:NIFTY50-INDEX|1h"
     private val candlesByInstrument = mutableMapOf<String, List<Candle>>()
     // Latest live LTP received over the websocket, per backend symbol.
     private val liveLtpByInstrument = mutableMapOf<String, Double>()
@@ -123,12 +129,22 @@ class MainActivity : Activity() {
         val instrument = selectedInstrument
         val requestedSymbol = instrument.backendSymbol
         val requestedTimeframe = selectedTimeframe
+        val cacheKey = "$requestedSymbol|$requestedTimeframe"
+
+        // Use already-loaded historical data immediately.
+        candlesByInstrument[cacheKey]?.let { cached ->
+            if (cached.isNotEmpty()) {
+                setHeaderStatus(null)
+                renderHomeData(cached)
+                return
+            }
+        }
+
         val resolution = timeframeResolution()
 
         setHeaderStatus("Loading ${instrument.displayName}…")
 
         val historyDays = 365
-
         val request = Request.Builder()
             .url(
                 "$BACKEND_HTTP_BASE/history" +
@@ -141,12 +157,9 @@ class MainActivity : Activity() {
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                 runOnUiThread {
                     if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
-                        setHeaderStatus("Network error — retrying shortly")
-                        liveHandler.postDelayed({
-                            if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
-                                loadHistoryForSelected()
-                            }
-                        }, 4000)
+                        setHeaderStatus(
+                            "Network error: ${e.javaClass.simpleName} — ${e.message ?: "unknown"}"
+                        )
                     }
                 }
             }
@@ -207,7 +220,8 @@ class MainActivity : Activity() {
                             return
                         }
 
-                        candlesByInstrument[requestedSymbol] = candles
+                        // Cache by both instrument and timeframe.
+                        candlesByInstrument[cacheKey] = candles
 
                         runOnUiThread {
                             if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
@@ -219,7 +233,7 @@ class MainActivity : Activity() {
                     } catch (e: Exception) {
                         runOnUiThread {
                             if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
-                                setHeaderStatus("Could not parse market data")
+                                setHeaderStatus("History parse error: ${e.javaClass.simpleName}")
                             }
                         }
                     }
@@ -445,7 +459,7 @@ class MainActivity : Activity() {
 
         // Show cached data immediately (if any) while a fresh reload is in flight,
         // then always reload from the backend for the current selection.
-        candlesByInstrument[selectedInstrument.backendSymbol]?.let { cached ->
+        candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]?.let { cached ->
             renderHomeData(cached)
         }
         updateHeaderPrice()
@@ -705,7 +719,7 @@ class MainActivity : Activity() {
         if (!isHomeScreenActive) return
 
         val symbol = selectedInstrument.backendSymbol
-        val candles = candlesByInstrument[symbol]
+        val candles = candlesByInstrument["$symbol|$selectedTimeframe"]
         val liveLtp = liveLtpByInstrument[symbol]
 
         val price: Float = when {
@@ -783,7 +797,7 @@ class MainActivity : Activity() {
 
     
 private fun runBacktest() {
-    val uiCandles = candlesByInstrument[selectedInstrument.backendSymbol]
+    val uiCandles = candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]
 
     if (uiCandles.isNullOrEmpty()) {
         Toast.makeText(
@@ -993,7 +1007,7 @@ private fun showBacktest() {
     content.addView(section("Results"))
 
     content.addView(label(
-        "Historical data: ${candlesByInstrument[selectedInstrument.backendSymbol]?.size ?: 0} candles"
+        "Historical data: ${candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]?.size ?: 0} candles"
     ))
 
     content.addView(label(
