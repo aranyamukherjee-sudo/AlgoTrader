@@ -39,6 +39,8 @@ import com.algotrader.backtest.BacktestResult
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.strategy.CprEmaTrendStrategy
 import com.algotrader.strategy.DonchianEmaTrendStrategy
+import com.algotrader.app.ui.screens.MarketDataScreen
+import com.algotrader.app.ui.screens.ExecutionScreen
 /**
  * Real-time candle for the selected instrument/timeframe.
  * All values come from the AlgoTrader backend (FYERS-backed) — never fabricated.
@@ -973,25 +975,9 @@ class MainActivity : Activity() {
 
     private fun showMarketData() {
         clearContent()
-
-        content.addView(title("Market Data"))
-        content.addView(label("Market data configuration and instruments"))
-
-        content.addView(section("Indices"))
-        content.addView(label("NIFTY 50"))
-        content.addView(label("BANK NIFTY"))
-        content.addView(label("SENSEX"))
-
-        content.addView(section("Data Status"))
-
-        val status = label(
-            "LIVE MARKET DATA\n\n" +
-                "Provider: FYERS\n" +
-                "Streaming: Connected\n" +
-                "Indices: NIFTY 50 • BANK NIFTY • SENSEX"
-        )
-
-        content.addView(status)
+        // isLiveConnected reads the existing quotesWebSocket reference as-is —
+        // no change to how/when it is set (see connectQuotesWebSocket()).
+        MarketDataScreen.render(this, content, isLiveConnected = quotesWebSocket != null)
     }
 
     private fun showStrategies() {
@@ -1010,15 +996,7 @@ class MainActivity : Activity() {
 
     private fun showExecution() {
         clearContent()
-
-        content.addView(title("Execution"))
-
-        content.addView(section("Trading Mode"))
-        content.addView(label("PAPER TRADING"))
-        content.addView(label("Status: STANDBY"))
-
-        content.addView(section("Broker Connection"))
-        content.addView(label("Not connected"))
+        ExecutionScreen.render(this, content)
     }
 
     
