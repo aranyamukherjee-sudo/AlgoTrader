@@ -41,6 +41,19 @@ import com.algotrader.strategy.CprEmaTrendStrategy
 import com.algotrader.strategy.DonchianEmaTrendStrategy
 import com.algotrader.app.ui.screens.MarketDataScreen
 import com.algotrader.app.ui.screens.ExecutionScreen
+
+import com.algotrader.app.theme.AltrixaColors
+import com.algotrader.app.theme.AltrixaDimens
+import com.algotrader.app.ui.components.AltrixaTone
+import com.algotrader.app.ui.components.altrixaCard
+import com.algotrader.app.ui.components.altrixaChip
+import com.algotrader.app.ui.components.altrixaPrimaryButton
+import com.algotrader.app.ui.components.altrixaSecondaryButton
+import com.algotrader.app.ui.components.altrixaStatusBadge
+import com.algotrader.app.ui.components.altrixaTitle
+import com.algotrader.app.ui.nav.AltrixaBottomNav
+import com.algotrader.app.ui.nav.AltrixaDestination
+import com.algotrader.app.ui.screens.BacktestScreen
 /**
  * Real-time candle for the selected instrument/timeframe.
  * All values come from the AlgoTrader backend (FYERS-backed) — never fabricated.
