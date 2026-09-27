@@ -21,12 +21,14 @@ android {
             val keyAliasValue = System.getenv("ANDROID_KEY_ALIAS")
             val keyPasswordValue = System.getenv("ANDROID_KEY_PASSWORD")
 
-            storeFile = rootProject.file("keystore/algotrader-release.jks")
-            if (keystorePassword != null && keyAliasValue != null && keyPasswordValue != null) {
-                storePassword = keystorePassword
-                keyAlias = keyAliasValue
-                keyPassword = keyPasswordValue
+            if (keystorePassword == null || keyAliasValue == null || keyPasswordValue == null) {
+                throw GradleException("Android release signing secrets are not configured")
             }
+
+            storeFile = rootProject.file("keystore/algotrader-release.jks")
+            storePassword = keystorePassword
+            keyAlias = keyAliasValue
+            keyPassword = keyPasswordValue
         }
     }
 
