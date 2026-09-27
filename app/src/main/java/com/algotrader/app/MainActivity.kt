@@ -42,6 +42,15 @@ import com.algotrader.strategy.DonchianEmaTrendStrategy
 import com.algotrader.app.ui.screens.MarketDataScreen
 import com.algotrader.app.ui.screens.ExecutionScreen
 import com.algotrader.app.ui.screens.BacktestScreen
+import com.algotrader.app.ui.nav.AltrixaBottomNav
+import com.algotrader.app.ui.nav.AltrixaDestination
+import com.algotrader.app.theme.AltrixaColors
+import com.algotrader.app.theme.AltrixaDimens
+import com.algotrader.app.ui.components.AltrixaTone
+import com.algotrader.app.ui.components.altrixaCard
+import com.algotrader.app.ui.components.altrixaChip
+import com.algotrader.app.ui.components.altrixaPrimaryButton
+import com.algotrader.app.ui.components.altrixaStatusBadge
 /**
  * Real-time candle for the selected instrument/timeframe.
  * All values come from the AlgoTrader backend (FYERS-backed) — never fabricated.
@@ -83,7 +92,7 @@ class MainActivity : Activity() {
     }
 
     private lateinit var content: LinearLayout
-    private lateinit var bottomNav: LinearLayout
+    private lateinit var bottomNav: AltrixaBottomNav
 
     private val liveHandler = Handler(Looper.getMainLooper())
     private val wsClient = OkHttpClient.Builder()
@@ -124,6 +133,14 @@ class MainActivity : Activity() {
     private var rsiChartView: RsiChartView? = null
     private val timeframeButtons = mutableMapOf<String, Button>()
     private val instrumentButtons = mutableMapOf<String, Button>()
+
+    // ---- Phase 2 dashboard: connection badge + OHLC strip (presentation-only) ----
+    private var headerConnectionRow: LinearLayout? = null
+    private var headerConnectionBadge: TextView? = null
+    private var ohlcOpenValue: TextView? = null
+    private var ohlcHighValue: TextView? = null
+    private var ohlcLowValue: TextView? = null
+    private var ohlcCloseValue: TextView? = null
 
     // ---------------------------------------------------------------------
     // Networking
@@ -488,6 +505,9 @@ class MainActivity : Activity() {
 
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     // Connection established.
+                    runOnUiThread {
+                        if (isHomeScreenActive) refreshHeaderConnectionBadge()
+                    }
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
@@ -520,6 +540,10 @@ class MainActivity : Activity() {
                 ) {
                     quotesWebSocket = null
 
+                    runOnUiThread {
+                        if (isHomeScreenActive) refreshHeaderConnectionBadge()
+                    }
+
                     liveHandler.postDelayed(
                         { connectQuotesWebSocket() },
                         2000
@@ -551,30 +575,33 @@ class MainActivity : Activity() {
     private fun buildApp() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.rgb(10, 14, 20))
+            setBackgroundColor(AltrixaColors.background)
         }
 
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(8))
+            setBackgroundColor(AltrixaColors.background)
+            setPadding(
+                dp(AltrixaDimens.spaceLg),
+                dp(AltrixaDimens.spaceLg),
+                dp(AltrixaDimens.spaceLg),
+                dp(AltrixaDimens.spaceSm)
+            )
         }
 
         val contentScroll = ScrollView(this).apply {
             addView(content)
         }
 
-        bottomNav = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(dp(2), dp(6), dp(2), dp(6))
-            setBackgroundColor(Color.rgb(20, 25, 32))
+        bottomNav = AltrixaBottomNav(this) { destination ->
+            when (destination) {
+                AltrixaDestination.HOME -> showHome()
+                AltrixaDestination.MARKET_DATA -> showMarketData()
+                AltrixaDestination.STRATEGIES -> showStrategies()
+                AltrixaDestination.EXECUTION -> showExecution()
+                AltrixaDestination.BACKTEST -> showBacktest()
+            }
         }
-
-        addNavButton("Home") { showHome() }
-        addNavButton("Market Data") { showMarketData() }
-        addNavButton("Strategies") { showStrategies() }
-        addNavButton("Execution") { showExecution() }
-        addNavButton("Backtest") { showBacktest() }
 
         root.addView(
             contentScroll,
@@ -598,23 +625,6 @@ class MainActivity : Activity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
-    private fun addNavButton(text: String, action: () -> Unit) {
-        val button = Button(this).apply {
-            this.text = text
-            textSize = 11f
-            setOnClickListener { action() }
-        }
-
-        bottomNav.addView(
-            button,
-            LinearLayout.LayoutParams(
-                0,
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                1f
-            )
-        )
-    }
-
     private fun clearContent() {
         isHomeScreenActive = false
         headerTitleLabel = null
@@ -627,32 +637,49 @@ class MainActivity : Activity() {
         rsiChartView = null
         timeframeButtons.clear()
         instrumentButtons.clear()
+        headerConnectionRow = null
+        headerConnectionBadge = null
+        ohlcOpenValue = null
+        ohlcHighValue = null
+        ohlcLowValue = null
+        ohlcCloseValue = null
         content.removeAllViews()
     }
 
     private fun title(text: String) =
         TextView(this).apply {
             this.text = text
-            textSize = 22f
-            setTextColor(Color.WHITE)
+            textSize = AltrixaDimens.textTitle
+            setTextColor(AltrixaColors.textPrimary)
             setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, 0, 0, dp(12))
+            setPadding(0, 0, 0, dp(AltrixaDimens.spaceMd))
         }
 
     private fun section(text: String) =
         TextView(this).apply {
             this.text = text
-            textSize = 15f
-            setTextColor(Color.WHITE)
-            setPadding(0, dp(14), 0, dp(6))
+            textSize = AltrixaDimens.textSection
+            setTextColor(AltrixaColors.textPrimary)
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(
+                0,
+                dp(AltrixaDimens.spaceMd),
+                0,
+                dp(AltrixaDimens.spaceSm)
+            )
         }
 
     private fun label(text: String) =
         TextView(this).apply {
             this.text = text
-            textSize = 13f
-            setTextColor(Color.LTGRAY)
-            setPadding(0, dp(3), 0, dp(3))
+            textSize = AltrixaDimens.textBody
+            setTextColor(AltrixaColors.textLabel)
+            setPadding(
+                0,
+                dp(AltrixaDimens.spaceXs),
+                0,
+                dp(AltrixaDimens.spaceXs)
+            )
         }
 
     private fun formatNumber(value: Float): String {
@@ -674,17 +701,39 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------------
 
     private fun showHome() {
+        bottomNav.setSelected(AltrixaDestination.HOME)
         clearContent()
         isHomeScreenActive = true
 
         content.addView(buildHeader())
-        content.addView(buildInstrumentSelector())
-        content.addView(buildTimeframeToolbar())
-        buildMainChart()
-        buildVolumePanel()
-        buildRsiPanel()
-        buildTimeRangeRow()
-        content.addView(buildTradeControls())
+        content.addView(
+            buildSelectorPanel(),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
+        )
+        content.addView(
+            buildChartPanel(),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
+        )
+        content.addView(
+            buildOhlcRow(),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
+        )
+        content.addView(
+            buildExecutionPanel(),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(10) }
+        )
 
         // Show cached data immediately (if any) while a fresh reload is in flight,
         // then always reload from the backend for the current selection.
@@ -695,24 +744,41 @@ class MainActivity : Activity() {
         loadHistoryForSelected()
     }
 
+    // ALTRIXA_PHASE2_HOME_DASHBOARD — premium terminal-style Home header/panels.
+    // Presentation only: values still come from renderHomeData()/updateHeaderPrice();
+    // no new data sources are introduced here.
     private fun buildHeader(): LinearLayout {
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, 0, dp(6))
+        val card = altrixaCard(this)
+
+        val brandRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
         }
+        brandRow.addView(
+            TextView(this).apply {
+                text = "ALTRIXA"
+                textSize = AltrixaDimens.textCaption
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(AltrixaColors.accent)
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        headerConnectionRow = brandRow
+        card.addView(brandRow)
 
         val titleRow = TextView(this).apply {
             text = "${selectedInstrument.displayName} · $selectedTimeframe"
             textSize = 15f
-            setTextColor(Color.rgb(160, 170, 185))
+            setTextColor(AltrixaColors.textSecondary)
+            setPadding(0, dp(6), 0, 0)
         }
         headerTitleLabel = titleRow
 
         val priceRow = TextView(this).apply {
             text = "—"
-            textSize = 28f
+            textSize = 30f
             setTypeface(typeface, Typeface.BOLD)
-            setTextColor(Color.WHITE)
+            setTextColor(AltrixaColors.textPrimary)
             setPadding(0, dp(2), 0, dp(2))
         }
         headerPriceLabel = priceRow
@@ -720,23 +786,42 @@ class MainActivity : Activity() {
         val changeRow = TextView(this).apply {
             text = ""
             textSize = 14f
-            setTextColor(Color.rgb(60, 200, 120))
+            setTextColor(AltrixaColors.positive)
         }
         headerChangeLabel = changeRow
 
         val statusRow = TextView(this).apply {
             text = ""
             textSize = 12f
-            setTextColor(Color.rgb(200, 160, 60))
+            setTextColor(AltrixaColors.warning)
             setPadding(0, dp(2), 0, 0)
         }
         headerStatusLabel = statusRow
 
-        container.addView(titleRow)
-        container.addView(priceRow)
-        container.addView(changeRow)
-        container.addView(statusRow)
-        return container
+        card.addView(titleRow)
+        card.addView(priceRow)
+        card.addView(changeRow)
+        card.addView(statusRow)
+
+        refreshHeaderConnectionBadge()
+
+        return card
+    }
+
+    /** Rebuilds the LIVE/OFFLINE badge in place, reflecting the real websocket state. */
+    private fun refreshHeaderConnectionBadge() {
+        val row = headerConnectionRow ?: return
+        val connected = quotesWebSocket != null
+
+        headerConnectionBadge?.let { row.removeView(it) }
+
+        val badge = altrixaStatusBadge(
+            this,
+            if (connected) "LIVE" else "OFFLINE",
+            if (connected) AltrixaTone.POSITIVE else AltrixaTone.NEGATIVE
+        )
+        headerConnectionBadge = badge
+        row.addView(badge)
     }
 
     private fun setHeaderStatus(text: String?) {
@@ -751,25 +836,18 @@ class MainActivity : Activity() {
         }
 
         Instruments.all.forEach { instrument ->
-            val button = Button(this).apply {
-                text = instrument.displayName
-                textSize = 11f
-                isAllCaps = false
-                setPadding(dp(4), 0, dp(4), 0)
-                applySelectorStyle(this, instrument.backendSymbol == selectedInstrument.backendSymbol)
-
-                setOnClickListener {
-                    if (selectedInstrument.backendSymbol != instrument.backendSymbol) {
-                        selectedInstrument = instrument
-                        showHome()
-                    }
+            val selected = instrument.backendSymbol == selectedInstrument.backendSymbol
+            val chip = altrixaChip(this, instrument.displayName, selected) {
+                if (selectedInstrument.backendSymbol != instrument.backendSymbol) {
+                    selectedInstrument = instrument
+                    showHome()
                 }
             }
 
-            instrumentButtons[instrument.backendSymbol] = button
+            instrumentButtons[instrument.backendSymbol] = chip
 
             row.addView(
-                button,
+                chip,
                 LinearLayout.LayoutParams(0, dp(40), 1f).apply {
                     marginEnd = dp(4)
                 }
@@ -786,24 +864,18 @@ class MainActivity : Activity() {
         }
 
         TIMEFRAMES.forEach { timeframe ->
-            val button = Button(this).apply {
-                text = timeframe
-                textSize = 11f
-                isAllCaps = false
-                applySelectorStyle(this, timeframe == selectedTimeframe)
-
-                setOnClickListener {
-                    if (selectedTimeframe != timeframe) {
-                        selectedTimeframe = timeframe
-                        showHome()
-                    }
+            val selected = timeframe == selectedTimeframe
+            val chip = altrixaChip(this, timeframe, selected) {
+                if (selectedTimeframe != timeframe) {
+                    selectedTimeframe = timeframe
+                    showHome()
                 }
             }
 
-            timeframeButtons[timeframe] = button
+            timeframeButtons[timeframe] = chip
 
             row.addView(
-                button,
+                chip,
                 LinearLayout.LayoutParams(0, dp(38), 1f).apply {
                     marginEnd = dp(2)
                 }
@@ -813,30 +885,36 @@ class MainActivity : Activity() {
         return row
     }
 
-    private fun applySelectorStyle(button: Button, selected: Boolean) {
-        if (selected) {
-            button.setBackgroundColor(Color.rgb(41, 121, 255))
-            button.setTextColor(Color.WHITE)
-        } else {
-            button.setBackgroundColor(Color.rgb(30, 36, 46))
-            button.setTextColor(Color.rgb(180, 188, 200))
-        }
+    /** Instrument + timeframe chips, grouped into one ALTRIXA panel. */
+    private fun buildSelectorPanel(): LinearLayout {
+        val card = altrixaCard(this)
+        card.addView(buildInstrumentSelector())
+        card.addView(
+            TextView(this).apply {
+                text = "TIMEFRAME"
+                textSize = AltrixaDimens.textCaption
+                setTextColor(AltrixaColors.textFaint)
+                setPadding(0, dp(8), 0, dp(4))
+            }
+        )
+        card.addView(buildTimeframeToolbar())
+        return card
     }
 
-    private fun buildMainChart(): TradingChartView {
+    private fun buildMainChart(parent: LinearLayout): TradingChartView {
         val chart = TradingChartView(this)
         mainChartView = chart
-        content.addView(
+        parent.addView(
             chart,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(280))
         )
         return chart
     }
 
-    private fun buildVolumePanel(): VolumeChartView {
+    private fun buildVolumePanel(parent: LinearLayout): VolumeChartView {
         val volume = VolumeChartView(this)
         volumeChartView = volume
-        content.addView(
+        parent.addView(
             volume,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(70)).apply {
                 topMargin = dp(2)
@@ -845,10 +923,10 @@ class MainActivity : Activity() {
         return volume
     }
 
-    private fun buildRsiPanel(): RsiChartView {
+    private fun buildRsiPanel(parent: LinearLayout): RsiChartView {
         val rsi = RsiChartView(this)
         rsiChartView = rsi
-        content.addView(
+        parent.addView(
             rsi,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(90)).apply {
                 topMargin = dp(2)
@@ -857,46 +935,112 @@ class MainActivity : Activity() {
         return rsi
     }
 
-    private fun buildTimeRangeRow(): TextView {
+    private fun buildTimeRangeRow(parent: LinearLayout): TextView {
         val label = TextView(this).apply {
             text = ""
             textSize = 11f
-            setTextColor(Color.rgb(120, 128, 140))
+            setTextColor(AltrixaColors.textFaint)
             setPadding(0, dp(6), 0, dp(6))
         }
         timeRangeLabel = label
-        content.addView(label)
+        parent.addView(label)
         return label
     }
 
-    private fun buildTradeControls(): LinearLayout {
+    /** Candlestick + EMA20/EMA50, volume, RSI(14) and the time-range caption, in one panel. */
+    private fun buildChartPanel(): LinearLayout {
+        val card = altrixaCard(this)
+        buildMainChart(card)
+        buildVolumePanel(card)
+        buildRsiPanel(card)
+        buildTimeRangeRow(card)
+        return card
+    }
+
+    /** Compact OHLC strip for the most recently loaded real candle. */
+    private fun buildOhlcRow(): LinearLayout {
+        val card = altrixaCard(this)
+
+        card.addView(
+            TextView(this).apply {
+                text = "MARKET DATA"
+                textSize = AltrixaDimens.textCaption
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(AltrixaColors.textFaint)
+                setPadding(0, 0, 0, dp(8))
+            }
+        )
+
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(4), 0, dp(12))
         }
 
-        val buy = Button(this).apply {
-            text = "BUY"
-            textSize = 14f
-            setTypeface(typeface, Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.rgb(38, 166, 91))
-            setOnClickListener { placeOrder("BUY") }
+        fun ohlcCell(labelText: String): Pair<LinearLayout, TextView> {
+            val cell = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            cell.addView(
+                TextView(this@MainActivity).apply {
+                    text = labelText
+                    textSize = AltrixaDimens.textCaption
+                    setTextColor(AltrixaColors.textFaint)
+                }
+            )
+            val value = TextView(this@MainActivity).apply {
+                text = "—"
+                textSize = AltrixaDimens.textBody
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(AltrixaColors.textPrimary)
+                setPadding(0, dp(2), 0, 0)
+            }
+            cell.addView(value)
+            return cell to value
         }
 
-        val sell = Button(this).apply {
-            text = "SELL"
-            textSize = 14f
-            setTypeface(typeface, Typeface.BOLD)
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.rgb(239, 83, 80))
-            setOnClickListener { placeOrder("SELL") }
+        val (openCell, openValue) = ohlcCell("OPEN")
+        val (highCell, highValue) = ohlcCell("HIGH")
+        val (lowCell, lowValue) = ohlcCell("LOW")
+        val (closeCell, closeValue) = ohlcCell("CLOSE")
+
+        ohlcOpenValue = openValue
+        ohlcHighValue = highValue
+        ohlcLowValue = lowValue
+        ohlcCloseValue = closeValue
+
+        listOf(openCell, highCell, lowCell, closeCell).forEach { cell ->
+            row.addView(cell, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         }
+
+        card.addView(row)
+        return card
+    }
+
+    /** BUY/SELL — same placeOrder() call as before; execution is still not connected. */
+    private fun buildExecutionPanel(): LinearLayout {
+        val card = altrixaCard(this)
+
+        card.addView(
+            TextView(this).apply {
+                text = "EXECUTION"
+                textSize = AltrixaDimens.textCaption
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(AltrixaColors.textFaint)
+                setPadding(0, 0, 0, dp(8))
+            }
+        )
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        val buy = altrixaPrimaryButton(this, "BUY", AltrixaColors.positive) { placeOrder("BUY") }
+        val sell = altrixaPrimaryButton(this, "SELL", AltrixaColors.negative) { placeOrder("SELL") }
 
         row.addView(buy, LinearLayout.LayoutParams(0, dp(56), 1f).apply { marginEnd = dp(6) })
         row.addView(sell, LinearLayout.LayoutParams(0, dp(56), 1f))
 
-        return row
+        card.addView(row)
+        return card
     }
 
     /**
@@ -931,6 +1075,12 @@ class MainActivity : Activity() {
         headerTitleLabel?.text = "${selectedInstrument.displayName} · $selectedTimeframe"
         updateHeaderPrice()
 
+        val latestCandle = candles.last()
+        ohlcOpenValue?.text = formatNumber(latestCandle.open)
+        ohlcHighValue?.text = formatNumber(latestCandle.high)
+        ohlcLowValue?.text = formatNumber(latestCandle.low)
+        ohlcCloseValue?.text = formatNumber(latestCandle.close)
+
         val dateFormat = if (isDaily) {
             SimpleDateFormat("dd MMM yyyy", Locale.US)
         } else {
@@ -964,7 +1114,7 @@ class MainActivity : Activity() {
         headerPriceLabel?.text = formatNumber(price)
         headerChangeLabel?.text = "${formatChange(change)} (${formatPercent(pct)})"
         headerChangeLabel?.setTextColor(
-            if (change >= 0) Color.rgb(60, 200, 120) else Color.rgb(239, 83, 80)
+            if (change >= 0) AltrixaColors.positive else AltrixaColors.negative
         )
 
         mainChartView?.setLatestPrice(price)
@@ -975,6 +1125,7 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------------
 
     private fun showMarketData() {
+        bottomNav.setSelected(AltrixaDestination.MARKET_DATA)
         clearContent()
         // isLiveConnected reads the existing quotesWebSocket reference as-is —
         // no change to how/when it is set (see connectQuotesWebSocket()).
@@ -982,6 +1133,7 @@ class MainActivity : Activity() {
     }
 
     private fun showStrategies() {
+        bottomNav.setSelected(AltrixaDestination.STRATEGIES)
         clearContent()
 
         content.addView(title("Strategies"))
@@ -996,6 +1148,7 @@ class MainActivity : Activity() {
     }
 
     private fun showExecution() {
+        bottomNav.setSelected(AltrixaDestination.EXECUTION)
         clearContent()
         ExecutionScreen.render(this, content)
     }

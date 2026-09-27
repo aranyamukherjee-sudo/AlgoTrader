@@ -5,12 +5,15 @@
     <application
         android:allowBackup="true"
         android:usesCleartextTraffic="true"
-        android:label="AlgoTrader"
+        android:label="ALTRIXA"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true">
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:theme="@style/Theme.Altrixa">
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
