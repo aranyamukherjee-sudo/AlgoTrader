@@ -58,12 +58,8 @@ def on_message(message):
 
 AUTH_ERROR_CODES = {-8, -15, -16, -17, -99}
 
-def on_error(error):
-    global fyers_status, last_fyers_error
 
-    print("FYERS ERROR:", error, flush=True)
-    last_fyers_error = str(error)
-
+def classify_fyers_error(error):
     code = None
 
     if isinstance(error, dict):
@@ -73,11 +69,22 @@ def on_error(error):
         except (TypeError, ValueError):
             pass
 
+    return code
+
+
+def on_error(error):
+    global fyers_status, last_fyers_error
+
+    print("FYERS ERROR:", error, flush=True)
+    last_fyers_error = str(error)
+
+    code = classify_fyers_error(error)
+
     if code in AUTH_ERROR_CODES:
         fyers_status = "auth_expired"
         print(
             "FYERS authentication expired/invalid. "
-            "Generate a new access token through FYERS OAuth.",
+            "Generate a fresh access token through FYERS OAuth.",
             flush=True,
         )
     else:
@@ -85,18 +92,26 @@ def on_error(error):
 
 
 def on_close(message):
-    global fyers_status
+    global fyers_status, last_fyers_error
 
     print("FYERS CLOSED:", message, flush=True)
 
-    if fyers_status != "auth_expired":
-        fyers_status = "closed"
+    # Never overwrite an authentication failure with "closed".
+    # This keeps /health truthful after an expired token.
+    if fyers_status == "auth_expired":
+        return
+
+    fyers_status = "closed"
+
+    if message:
+        last_fyers_error = str(message)
 
 
 def on_open():
-    global fyers_status
+    global fyers_status, last_fyers_error
 
     fyers_status = "connected"
+    last_fyers_error = None
 
     print("FYERS WebSocket connected", flush=True)
 
@@ -111,22 +126,35 @@ def on_open():
 
 
 def connect_fyers(access_token):
-    global socket, history_client, fyers_status
+    global socket, history_client, fyers_status, last_fyers_error
 
     app_id = os.getenv("FYERS_APP_ID")
 
-    if not app_id or not access_token:
+    if not app_id:
         fyers_status = "not_configured"
+        last_fyers_error = "FYERS_APP_ID is not configured"
+        print(last_fyers_error, flush=True)
         return
 
+    if not access_token:
+        fyers_status = "auth_expired"
+        last_fyers_error = "FYERS_ACCESS_TOKEN is not configured"
+        print(last_fyers_error, flush=True)
+        return
+
+    # REST client uses the raw access token.
     history_client = fyersModel.FyersModel(
         client_id=app_id,
         token=access_token,
         log_path=""
     )
 
+    # FYERS Data WebSocket authentication requires:
+    # APP_ID:ACCESS_TOKEN
+    websocket_token = f"{app_id}:{access_token}"
+
     socket = data_ws.FyersDataSocket(
-        access_token=f"{app_id}:{access_token}",
+        access_token=websocket_token,
         log_path="",
         litemode=False,
         write_to_file=False,
@@ -138,6 +166,12 @@ def connect_fyers(access_token):
     )
 
     fyers_status = "connecting"
+    last_fyers_error = None
+
+    print(
+        "Starting FYERS connection using configured OAuth access token.",
+        flush=True,
+    )
 
     threading.Thread(
         target=socket.connect,
@@ -148,9 +182,18 @@ def connect_fyers(access_token):
 def auth_manager():
     global fyers_status, last_fyers_error
 
-    # FYERS refresh-token API is disabled for this setup.
-    # Use the access token generated through the normal OAuth flow.
+    # Deliberately use the normal FYERS OAuth access-token flow.
+    #
+    # We do NOT run an automatic refresh loop here. FYERS'
+    # current authentication framework requires deliberate
+    # authentication rather than assuming a perpetual session.
     access_token = os.getenv("FYERS_ACCESS_TOKEN")
+
+    if not os.getenv("FYERS_APP_ID"):
+        fyers_status = "not_configured"
+        last_fyers_error = "FYERS_APP_ID is not configured"
+        print(last_fyers_error, flush=True)
+        return
 
     if not access_token:
         fyers_status = "auth_expired"
@@ -178,8 +221,10 @@ def health():
         "status": "ok",
         "service": "AlgoTrader Market Data API",
         "fyers": fyers_status,
-        "auth_mode": "access_token",
-        "access_token_configured": bool(os.getenv("FYERS_ACCESS_TOKEN")),
+        "auth_mode": "oauth_access_token",
+        "access_token_configured": bool(
+            os.getenv("FYERS_ACCESS_TOKEN")
+        ),
         "last_error": last_fyers_error,
     }
 
