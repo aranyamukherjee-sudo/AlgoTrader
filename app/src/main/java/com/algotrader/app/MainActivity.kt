@@ -41,6 +41,7 @@ import com.algotrader.strategy.CprEmaTrendStrategy
 import com.algotrader.strategy.DonchianEmaTrendStrategy
 import com.algotrader.app.ui.screens.MarketDataScreen
 import com.algotrader.app.ui.screens.ExecutionScreen
+import com.algotrader.app.ui.screens.BacktestScreen
 /**
  * Real-time candle for the selected instrument/timeframe.
  * All values come from the AlgoTrader backend (FYERS-backed) — never fabricated.
@@ -1050,17 +1051,16 @@ private fun runBacktest() {
 
     content.removeAllViews()
 
-    content.addView(title("Backtest"))
+    val strategies = listOf(CprEmaTrendStrategy(), DonchianEmaTrendStrategy())
 
-    content.addView(section("Running"))
-    content.addView(label(
-        "${selectedInstrument.displayName} · $selectedTimeframe"
-    ))
-    content.addView(label(
-        "${domainCandles.size} real FYERS candles"
-    ))
-
-    content.addView(label("Testing CPR + EMA and Donchian + EMA…"))
+    BacktestScreen.renderRunning(
+        this,
+        content,
+        instrumentName = selectedInstrument.displayName,
+        timeframe = selectedTimeframe,
+        candleCount = domainCandles.size,
+        strategies = strategies
+    )
 
     Thread {
         try {
@@ -1071,16 +1071,7 @@ private fun runBacktest() {
 
             val engine = BacktestEngine(config)
 
-            val results = listOf(
-                engine.run(
-                    CprEmaTrendStrategy(),
-                    domainCandles
-                ),
-                engine.run(
-                    DonchianEmaTrendStrategy(),
-                    domainCandles
-                )
-            )
+            val results = strategies.map { strategy -> engine.run(strategy, domainCandles) }
 
             runOnUiThread {
                 renderBacktestResults(results, domainCandles.size)
@@ -1089,11 +1080,13 @@ private fun runBacktest() {
         } catch (e: Exception) {
             runOnUiThread {
                 content.removeAllViews()
-                content.addView(title("Backtest"))
-                content.addView(section("Error"))
-                content.addView(label(
+                BacktestScreen.renderError(
+                    this,
+                    content,
                     e.message ?: "Backtest failed"
-                ))
+                ) {
+                    runBacktest()
+                }
             }
         }
     }.start()
@@ -1105,135 +1098,35 @@ private fun renderBacktestResults(
 ) {
     content.removeAllViews()
 
-    content.addView(title("Backtest Results"))
-
-    content.addView(section("Test"))
-
-    content.addView(label(
-        "${selectedInstrument.displayName} · $selectedTimeframe"
-    ))
-
-    content.addView(label(
-        "$candleCount real FYERS candles"
-    ))
-
-    content.addView(label("Capital: ₹100,000 · Position: 1 unit"))
-
-    results.forEach { result ->
-        val m = result.metrics
-
-        content.addView(section(result.strategyName))
-
-        content.addView(label(
-            "Final Equity: ${formatMoney(result.finalEquity)}"
-        ))
-
-        content.addView(label(
-            "Net P&L: ${formatMoney(m.netProfit)}"
-        ))
-
-        content.addView(label(
-            "Return: ${formatPercent(m.totalReturnPercent)}"
-        ))
-
-        content.addView(label(
-            "Trades: ${m.totalTrades}"
-        ))
-
-        content.addView(label(
-            "Win Rate: ${formatPercent(m.winRate * 100.0)}"
-        ))
-
-        content.addView(label(
-            "Profit Factor: ${
-                m.profitFactor?.let {
-                    String.format(Locale.US, "%.2f", it)
-                } ?: "N/A"
-            }"
-        ))
-
-        content.addView(label(
-            "Max Drawdown: ${formatMoney(m.maxDrawdown)} " +
-                "(${formatPercent(m.maxDrawdownPercent)})"
-        ))
-
-        content.addView(label(
-            "Average Trade: ${formatMoney(m.averageTradePnl)}"
-        ))
-
-        content.addView(label(
-            "Winning Trades: ${m.winningTrades} · " +
-                "Losing Trades: ${m.losingTrades}"
-        ))
+    BacktestScreen.renderResults(
+        this,
+        content,
+        instrumentName = selectedInstrument.displayName,
+        timeframe = selectedTimeframe,
+        candleCount = candleCount,
+        initialCapital = 100_000.0,
+        positionQuantity = 1.0,
+        results = results
+    ) {
+        runBacktest()
     }
-
-    val rerunButton = Button(this).apply {
-        text = "RUN AGAIN"
-        isAllCaps = false
-        setOnClickListener {
-            runBacktest()
-        }
-    }
-
-    content.addView(rerunButton)
 }
 
 private fun showBacktest() {
     clearContent()
-
-    content.addView(title("Backtest"))
-
-    content.addView(section("Test Configuration"))
-    content.addView(label("Instrument: ${selectedInstrument.displayName}"))
-    content.addView(label("Timeframe: $selectedTimeframe"))
-    content.addView(label("Initial Capital: ₹100,000"))
-    content.addView(label("Position Size: 1 unit"))
-
-    content.addView(section("Strategies"))
-
-    content.addView(label("• CPR + EMA Trend"))
-    content.addView(label("  Daily CPR + EMA(20), long/short"))
-
-    content.addView(label("• Donchian + EMA Trend"))
-    content.addView(label("  Donchian(20) + EMA(50), long/short"))
-
-    val runButton = Button(this).apply {
-        text = "RUN BACKTEST"
-        isAllCaps = false
-        setOnClickListener {
-            runBacktest()
-        }
+    BacktestScreen.renderConfig(
+        this,
+        content,
+        instrumentName = selectedInstrument.displayName,
+        timeframe = selectedTimeframe,
+        candleCount = candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]?.size ?: 0,
+        initialCapital = 100_000.0,
+        positionQuantity = 1.0,
+        strategies = listOf(CprEmaTrendStrategy(), DonchianEmaTrendStrategy())
+    ) {
+        runBacktest()
     }
-
-    content.addView(runButton)
-
-    content.addView(section("Results"))
-
-    content.addView(label(
-        "Historical data: ${candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]?.size ?: 0} candles"
-    ))
-
-    content.addView(label(
-        "Press RUN BACKTEST to test both strategies on the loaded FYERS data."
-    ))
 }
-}
-
-// ---------------------------------------------------------------------------
-private fun formatMoney(value: Double): String {
-    return String.format(
-        Locale.US,
-        "₹%,.2f",
-        value
-    )
-}
-
-private fun formatPercent(value: Double): String {
-    return String.format(
-        Locale.US,
-        "%.2f%%",
-        value
-    )
 }
 
 // Indicator math — computed locally from real candle closes, never fetched.
