@@ -1066,7 +1066,13 @@ class MainActivity : Activity() {
         val rsi = computeRsi(closes, 14)
         val isDaily = selectedTimeframe == "1D"
 
-        mainChartView?.setData(candles, ema20, ema50, isDaily)
+        mainChartView?.setData(
+            candles = candles,
+            ema20 = ema20,
+            ema50 = ema50,
+            isDaily = isDaily,
+            candleIntervalSeconds = timeframeToSeconds(selectedTimeframe)
+        )
         volumeChartView?.setData(candles)
         rsiChartView?.setData(rsi)
 
@@ -1091,6 +1097,23 @@ class MainActivity : Activity() {
         val start = dateFormat.format(Date(candles.first().timestamp * 1000L))
         val end = dateFormat.format(Date(candles.last().timestamp * 1000L))
         timeRangeLabel?.text = "$start  →  $end  (IST)"
+    }
+
+    /**
+     * Converts the selected chart timeframe to seconds.
+     * Used by the live candle aggregator so the active candle
+     * matches the timeframe currently displayed by the user.
+     */
+    private fun timeframeToSeconds(timeframe: String): Long {
+        return when (timeframe) {
+            "1m" -> 60L
+            "5m" -> 5L * 60L
+            "15m" -> 15L * 60L
+            "30m" -> 30L * 60L
+            "1h" -> 60L * 60L
+            "1D" -> 24L * 60L * 60L
+            else -> 5L * 60L
+        }
     }
 
     /** Updates only the price/change header text — from live LTP if available, else last close. */
@@ -1361,6 +1384,7 @@ class TradingChartView(context: android.content.Context) : View(context) {
     private var ema50: List<Float> = emptyList()
     private var isDaily = false
     private var latestPrice: Float? = null
+    private var candleIntervalSeconds = 300L
 
     private var visibleCount = 80
     private var endIndex = 0
@@ -1438,12 +1462,14 @@ class TradingChartView(context: android.content.Context) : View(context) {
         candles: List<Candle>,
         ema20: List<Float>,
         ema50: List<Float>,
-        isDaily: Boolean
+        isDaily: Boolean,
+        candleIntervalSeconds: Long = 300L
     ) {
         this.candles = candles
         this.ema20 = ema20
         this.ema50 = ema50
         this.isDaily = isDaily
+        this.candleIntervalSeconds = candleIntervalSeconds.coerceAtLeast(60L)
 
         visibleCount =
             minOf(80, candles.size.coerceAtLeast(1))
@@ -1455,6 +1481,67 @@ class TradingChartView(context: android.content.Context) : View(context) {
     }
 
     fun setLatestPrice(price: Float) {
+        if (!price.isFinite() || price <= 0f) return
+
+        latestPrice = price
+
+        val interval = candleIntervalSeconds.coerceAtLeast(60L)
+        val nowSeconds = System.currentTimeMillis() / 1000L
+        val bucketTimestamp = (nowSeconds / interval) * interval
+
+        if (candles.isEmpty()) {
+            candles = listOf(
+                Candle(
+                    timestamp = bucketTimestamp,
+                    open = price,
+                    high = price,
+                    low = price,
+                    close = price,
+                    volume = 0f
+                )
+            )
+
+            visibleCount = minOf(80, candles.size.coerceAtLeast(1))
+            endIndex = candles.lastIndex
+
+            invalidate()
+            return
+        }
+
+        val last = candles.last()
+        val lastBucket = (last.timestamp / interval) * interval
+
+        if (lastBucket == bucketTimestamp) {
+            val updated = last.copy(
+                high = maxOf(last.high, price),
+                low = minOf(last.low, price),
+                close = price
+            )
+
+            candles = candles.dropLast(1) + updated
+
+        } else if (bucketTimestamp > lastBucket) {
+            candles = candles + Candle(
+                timestamp = bucketTimestamp,
+                open = price,
+                high = price,
+                low = price,
+                close = price,
+                volume = 0f
+            )
+
+            if (candles.size > 500) {
+                candles = candles.takeLast(500)
+            }
+
+            endIndex = candles.lastIndex
+
+        } else {
+            invalidate()
+            return
+        }
+
+        endIndex = candles.lastIndex
         latestPrice = price
         invalidate()
     }
