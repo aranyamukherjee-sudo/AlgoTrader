@@ -11,6 +11,8 @@ import android.view.Gravity
 import android.view.View
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import kotlin.math.pow
+import kotlin.math.roundToInt
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -1389,7 +1391,40 @@ class TradingChartView(context: android.content.Context) : View(context) {
     private var visibleCount = 80
     private var endIndex = 0
     private var crosshairIndex = -1
+
+    // Explicit live candle. This is kept separate from the historical
+    // dataset so live ticks are always visible even when the backend's
+    // latest historical candle belongs to the previous timeframe bucket.
+    private var liveCandle: Candle? = null
+
+    // Gesture state.
     private var lastTouchX = 0f
+    private var lastTouchY = 0f
+    private var dragRemainderX = 0f
+    private var isDragging = false
+
+    // Independent Y-axis viewport.
+    // 1.0 = normal price scale.
+    // >1 = zoomed into price movement.
+    // <1 = zoomed out.
+    private var priceZoom = 1f
+
+    // Price-axis vertical translation, expressed as a fraction of the
+    // currently visible price range.
+    private var pricePanFraction = 0f
+
+    // Gesture anchor values used for two-dimensional navigation.
+    private var gestureStartX = 0f
+    private var gestureStartY = 0f
+
+    // Double-tap resets the chart viewport to the latest candles.
+    private var lastTapTime = 0L
+    private var lastTapX = 0f
+    private var lastTapY = 0f
+
+    // Automatically follow the newest candle until the user manually pans
+    // backward. Live ticks must never force a manually selected chart position.
+    private var followLatest = true
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -1425,28 +1460,149 @@ class TradingChartView(context: android.content.Context) : View(context) {
         ScaleGestureDetector(
             context,
             object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+
+                override fun onScaleBegin(
+                    detector: ScaleGestureDetector
+                ): Boolean {
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    isDragging = false
+                    dragRemainderX = 0f
+                    return true
+                }
+
                 override fun onScale(
                     detector: ScaleGestureDetector
                 ): Boolean {
-                    visibleCount =
-                        (visibleCount / detector.scaleFactor)
-                            .toInt()
+                    if (candles.isEmpty()) return false
+
+                    val left = 8f
+                    val right = width - 96f
+                    val chartWidth =
+                        (right - left).coerceAtLeast(1f)
+
+                    val oldCount =
+                        visibleCount.coerceIn(
+                            2,
+                            candles.size
+                        )
+
+                    val oldStart =
+                        (endIndex - oldCount + 1)
+                            .coerceAtLeast(0)
+
+                    // Candle currently underneath the pinch centre.
+                    val focusRatio =
+                        (
+                            (detector.focusX - left) /
+                                chartWidth
+                        ).coerceIn(0f, 1f)
+
+                    val focusIndexFloat =
+                        oldStart +
+                            focusRatio *
+                            (oldCount - 1)
+
+                    // Android's scaleFactor:
+                    //   > 1 = fingers moving apart = zoom IN
+                    //   < 1 = fingers moving together = zoom OUT
+                    val rawScaleFactor = detector.scaleFactor
+
+                    android.util.Log.d(
+                        "ALTRIXA_PINCH",
+                        "scaleFactor=$rawScaleFactor focusX=${detector.focusX}"
+                    )
+
+                    val factor =
+                        rawScaleFactor
+                            .coerceIn(0.80f, 1.25f)
+
+                    // Explicit pinch direction:
+                    // fingers apart  -> zoom IN  -> fewer candles
+                    // fingers together -> zoom OUT -> more candles
+                    val zoomIn = detector.scaleFactor > 1f
+
+                    val zoomAmount =
+                        if (zoomIn) {
+                            1f / detector.scaleFactor
+                        } else {
+                            1f / detector.scaleFactor
+                        }
+
+                    val newCount =
+                        (
+                            oldCount * zoomAmount
+                        )
+                            .roundToInt()
                             .coerceIn(
-                                20,
-                                candles.size.coerceAtLeast(20)
+                                12,
+                                candles.size
                             )
 
-                    endIndex =
-                        endIndex.coerceIn(
-                            visibleCount - 1,
-                            candles.lastIndex
+                    if (newCount != oldCount) {
+
+                        // Keep the candle under the fingers
+                        // at the same horizontal position.
+                        val desiredStart =
+                            (
+                                focusIndexFloat -
+                                    focusRatio *
+                                    (newCount - 1)
+                            ).roundToInt()
+
+                        val maxStart =
+                            (
+                                candles.size -
+                                    newCount
+                            ).coerceAtLeast(0)
+
+                        val newStart =
+                            desiredStart.coerceIn(
+                                0,
+                                maxStart
+                            )
+
+                        endIndex =
+                            (
+                                newStart +
+                                    newCount -
+                                    1
+                            ).coerceIn(
+                                newCount - 1,
+                                candles.lastIndex
+                            )
+
+                        visibleCount = newCount
+                    }
+
+                    // Pinch controls horizontal/time zoom only.
+                    // Price-axis zoom remains independent so the chart
+                    // does not vertically expand or compress unexpectedly.
+                    
+                    // Pinching is an explicit viewport interaction.
+                    // Do not let incoming live ticks move the viewport
+                    // while the user is zooming.
+                    followLatest = false
+
+                    crosshairIndex =
+                        indexForX(
+                            detector.focusX,
+                            left,
+                            chartWidth
                         )
 
                     invalidate()
                     return true
                 }
+
+                override fun onScaleEnd(
+                    detector: ScaleGestureDetector
+                ) {
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                    dragRemainderX = 0f
+                }
             }
         )
+
 
     private val intradayFormat =
         SimpleDateFormat("dd MMM HH:mm", Locale.US).apply {
@@ -1471,11 +1627,19 @@ class TradingChartView(context: android.content.Context) : View(context) {
         this.isDaily = isDaily
         this.candleIntervalSeconds = candleIntervalSeconds.coerceAtLeast(60L)
 
+        // Keep the default view readable on phone-sized screens.
+        // Users can still pinch to zoom out/in.
         visibleCount =
-            minOf(80, candles.size.coerceAtLeast(1))
+            minOf(50, candles.size.coerceAtLeast(1))
 
         endIndex = candles.lastIndex
         crosshairIndex = -1
+        followLatest = true
+        liveCandle = null
+        dragRemainderX = 0f
+        isDragging = false
+        priceZoom = 1f
+        pricePanFraction = 0f
 
         invalidate()
     }
@@ -1490,38 +1654,7 @@ class TradingChartView(context: android.content.Context) : View(context) {
         val bucketTimestamp = (nowSeconds / interval) * interval
 
         if (candles.isEmpty()) {
-            candles = listOf(
-                Candle(
-                    timestamp = bucketTimestamp,
-                    open = price,
-                    high = price,
-                    low = price,
-                    close = price,
-                    volume = 0f
-                )
-            )
-
-            visibleCount = minOf(80, candles.size.coerceAtLeast(1))
-            endIndex = candles.lastIndex
-
-            invalidate()
-            return
-        }
-
-        val last = candles.last()
-        val lastBucket = (last.timestamp / interval) * interval
-
-        if (lastBucket == bucketTimestamp) {
-            val updated = last.copy(
-                high = maxOf(last.high, price),
-                low = minOf(last.low, price),
-                close = price
-            )
-
-            candles = candles.dropLast(1) + updated
-
-        } else if (bucketTimestamp > lastBucket) {
-            candles = candles + Candle(
+            val candle = Candle(
                 timestamp = bucketTimestamp,
                 open = price,
                 high = price,
@@ -1530,26 +1663,73 @@ class TradingChartView(context: android.content.Context) : View(context) {
                 volume = 0f
             )
 
-            if (candles.size > 500) {
-                candles = candles.takeLast(500)
-            }
+            liveCandle = candle
+            visibleCount = 1
+            endIndex = 0
+            followLatest = true
 
-            endIndex = candles.lastIndex
-
-        } else {
             invalidate()
             return
         }
 
-        endIndex = candles.lastIndex
-        latestPrice = price
+        val lastHistorical = candles.last()
+        val lastBucket =
+            (lastHistorical.timestamp / interval) * interval
+
+        if (lastBucket == bucketTimestamp) {
+            // The historical response already contains the active candle.
+            // Update it directly with the live FYERS price.
+            val updated = lastHistorical.copy(
+                high = maxOf(lastHistorical.high, price),
+                low = minOf(lastHistorical.low, price),
+                close = price
+            )
+
+            candles = candles.dropLast(1) + updated
+            liveCandle = null
+
+        } else {
+            // Keep a separate live candle. Its open is the latest known
+            // historical close and its OHLC then evolves with every tick.
+            val existing = liveCandle
+
+            liveCandle =
+                if (
+                    existing != null &&
+                    existing.timestamp == bucketTimestamp
+                ) {
+                    existing.copy(
+                        high = maxOf(existing.high, price),
+                        low = minOf(existing.low, price),
+                        close = price
+                    )
+                } else {
+                    Candle(
+                        timestamp = bucketTimestamp,
+                        open = lastHistorical.close,
+                        high = maxOf(lastHistorical.close, price),
+                        low = minOf(lastHistorical.close, price),
+                        close = price,
+                        volume = 0f
+                    )
+                }
+        }
+
+        if (followLatest) {
+            endIndex = candles.lastIndex
+        }
+
         invalidate()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+
+        // Always pass every pointer event to the scale detector.
         scaleDetector.onTouchEvent(event)
 
-        if (candles.isEmpty()) return true
+        if (candles.isEmpty() && liveCandle == null) {
+            return true
+        }
 
         val left = 8f
         val right = width - 96f
@@ -1559,52 +1739,229 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
             MotionEvent.ACTION_DOWN -> {
                 lastTouchX = event.x
-                crosshairIndex = indexForX(event.x, left, chartWidth)
+                lastTouchY = event.y
+                gestureStartX = event.x
+                gestureStartY = event.y
+                dragRemainderX = 0f
+                isDragging = false
+
+                crosshairIndex =
+                    indexForX(
+                        event.x,
+                        left,
+                        chartWidth
+                    )
+
                 invalidate()
                 return true
             }
 
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                parent?.requestDisallowInterceptTouchEvent(true)
+                return true
+            }
+
             MotionEvent.ACTION_MOVE -> {
-                if (scaleDetector.isInProgress || event.pointerCount > 1) {
+
+                if (
+                    scaleDetector.isInProgress ||
+                    event.pointerCount > 1
+                ) {
+                    parent?.requestDisallowInterceptTouchEvent(true)
                     return true
                 }
 
                 val dx = event.x - lastTouchX
+                val dy = event.y - lastTouchY
 
-                if (kotlin.math.abs(dx) >= 4f) {
-                    val slot = chartWidth / visibleCount.toFloat()
+                val totalDx = event.x - gestureStartX
+                val totalDy = event.y - gestureStartY
 
-                    if (slot > 0f) {
-                        val candleShift = (-dx / slot).toInt()
+                if (!isDragging) {
+                    if (
+                        kotlin.math.abs(totalDx) >= 5f ||
+                        kotlin.math.abs(totalDy) >= 5f
+                    ) {
+                        isDragging = true
+                        followLatest = false
+                        parent?.requestDisallowInterceptTouchEvent(true)
+                    } else {
+                        return true
+                    }
+                }
 
-                        if (candleShift != 0) {
-                            endIndex = (
+                parent?.requestDisallowInterceptTouchEvent(true)
+
+                // --------------------------------------------------------
+                // X AXIS — time navigation.
+                // --------------------------------------------------------
+                dragRemainderX += dx
+
+                val slot =
+                    chartWidth /
+                        visibleCount
+                            .coerceAtLeast(1)
+                            .toFloat()
+
+                if (slot > 0f) {
+                    val candleShift =
+                        (-dragRemainderX / slot).toInt()
+
+                    if (candleShift != 0) {
+                        endIndex =
+                            (
                                 endIndex + candleShift
                             ).coerceIn(
                                 visibleCount - 1,
                                 candles.lastIndex
                             )
 
-                            lastTouchX += candleShift * -slot
-                        }
+                        dragRemainderX -=
+                            candleShift * -slot
                     }
-
-                    crosshairIndex = indexForX(event.x, left, chartWidth)
-                    invalidate()
                 }
 
+                // --------------------------------------------------------
+                // Y AXIS — price/value navigation.
+                //
+                // Dragging upward moves the viewed price area upward.
+                // Dragging downward moves it downward.
+                // --------------------------------------------------------
+                val historicalRange =
+                    currentRawPriceRange()
+
+                if (historicalRange > 0f) {
+                    val chartHeight =
+                        (height - 46f)
+                            .coerceAtLeast(1f)
+
+                    pricePanFraction -=
+                        dy /
+                        chartHeight
+
+                    pricePanFraction =
+                        pricePanFraction.coerceIn(
+                            -3f,
+                            3f
+                        )
+                }
+
+                crosshairIndex =
+                    indexForX(
+                        event.x,
+                        left,
+                        chartWidth
+                    )
+
+                lastTouchX = event.x
+                lastTouchY = event.y
+
+                invalidate()
                 return true
             }
 
             MotionEvent.ACTION_UP,
             MotionEvent.ACTION_CANCEL -> {
-                crosshairIndex = indexForX(event.x, left, chartWidth)
+                parent?.requestDisallowInterceptTouchEvent(false)
+
+                val wasDragging = isDragging
+
+                isDragging = false
+                dragRemainderX = 0f
+
+                if (event.actionMasked == MotionEvent.ACTION_UP) {
+
+                    val now = event.eventTime
+
+                    val tapDistance =
+                        kotlin.math.hypot(
+                            event.x - lastTapX,
+                            event.y - lastTapY
+                        )
+
+                    val isDoubleTap =
+                        !wasDragging &&
+                        now - lastTapTime in 1L..350L &&
+                        tapDistance <= 48f
+
+                    if (isDoubleTap) {
+
+                        // --------------------------------------------
+                        // RESET VIEW
+                        // --------------------------------------------
+                        visibleCount =
+                            minOf(
+                                50,
+                                candles.size.coerceAtLeast(1)
+                            )
+
+                        endIndex =
+                            candles.lastIndex
+
+                        priceZoom = 1f
+                        pricePanFraction = 0f
+                        followLatest = true
+                        crosshairIndex = -1
+                        dragRemainderX = 0f
+
+                        lastTapTime = 0L
+                        lastTapX = event.x
+                        lastTapY = event.y
+
+                        invalidate()
+                        return true
+                    }
+
+                    lastTapTime = now
+                    lastTapX = event.x
+                    lastTapY = event.y
+
+                    crosshairIndex =
+                        indexForX(
+                            event.x,
+                            left,
+                            chartWidth
+                        )
+                }
+
                 invalidate()
                 return true
             }
         }
 
         return true
+    }
+
+    private fun currentRawPriceRange(): Float {
+        if (candles.isEmpty()) return 0f
+
+        val count =
+            visibleCount.coerceIn(
+                1,
+                candles.size
+            )
+
+        val startIndex =
+            (endIndex - count + 1)
+                .coerceAtLeast(0)
+
+        val endVisible =
+            (startIndex + count - 1)
+                .coerceAtMost(candles.lastIndex)
+
+        val visible =
+            candles.subList(
+                startIndex,
+                endVisible + 1
+            )
+
+        val min =
+            visible.minOf { it.low }
+
+        val max =
+            visible.maxOf { it.high }
+
+        return (max - min).coerceAtLeast(0.01f)
     }
 
     private fun indexForX(
@@ -1679,11 +2036,23 @@ class TradingChartView(context: android.content.Context) : View(context) {
             (startIndex + count - 1)
                 .coerceAtMost(candles.lastIndex)
 
-        val visibleCandles =
+        val historicalVisibleCandles =
             candles.subList(
                 startIndex,
                 endVisible + 1
             )
+
+        val visibleCandles =
+            if (
+                followLatest &&
+                liveCandle != null &&
+                liveCandle!!.timestamp >
+                    candles.last().timestamp
+            ) {
+                historicalVisibleCandles + liveCandle!!
+            } else {
+                historicalVisibleCandles
+            }
 
         var minPrice =
             visibleCandles.minOf { it.low }
@@ -1711,17 +2080,49 @@ class TradingChartView(context: android.content.Context) : View(context) {
                 }
             }
 
-        latestPrice?.let {
-            minPrice = minOf(minPrice, it)
-            maxPrice = maxOf(maxPrice, it)
-        }
+        // Live price is already represented by the live candle when
+        // available. Do not let every tick reset the user's Y viewport.
+        val rawMinPrice = minPrice
+        val rawMaxPrice = maxPrice
 
+        val rawRange =
+            (rawMaxPrice - rawMinPrice)
+                .coerceAtLeast(0.01f)
+
+        // Base padding keeps candles from touching the chart edges.
         val padding =
-            ((maxPrice - minPrice) * 0.08f)
+            (rawRange * 0.08f)
                 .coerceAtLeast(0.5f)
 
-        minPrice -= padding
-        maxPrice += padding
+        val baseMin =
+            rawMinPrice - padding
+
+        val baseMax =
+            rawMaxPrice + padding
+
+        val baseRange =
+            (baseMax - baseMin)
+                .coerceAtLeast(0.01f)
+
+        // Y zoom changes the amount of price space visible.
+        val viewportRange =
+            (baseRange / priceZoom)
+                .coerceAtLeast(0.01f)
+
+        val baseCenter =
+            (baseMin + baseMax) / 2f
+
+        // Positive panFraction means the viewport follows the user's
+        // vertical drag rather than continuously snapping to auto-fit.
+        val center =
+            baseCenter +
+            pricePanFraction * baseRange
+
+        minPrice =
+            center - viewportRange / 2f
+
+        maxPrice =
+            center + viewportRange / 2f
 
         val range =
             (maxPrice - minPrice)
@@ -1774,11 +2175,11 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
         val slot =
             (right - left) /
-            visibleCandles.size.toFloat()
+            visibleCandles.size.coerceAtLeast(1).toFloat()
 
         val bodyWidth =
-            (slot * 0.6f)
-                .coerceAtLeast(2f)
+            (slot * 0.68f)
+                .coerceAtLeast(3f)
 
         // Candles.
         visibleCandles.forEachIndexed { index, candle ->
@@ -1836,6 +2237,43 @@ class TradingChartView(context: android.content.Context) : View(context) {
                 ),
                 paint
             )
+        }
+
+        // Explicit live-candle outline. This makes the active FYERS candle
+        // visually obvious even when its body is only a few pixels high.
+        liveCandle?.let { live ->
+            if (
+                visibleCandles.isNotEmpty() &&
+                live.timestamp >= visibleCandles.last().timestamp
+            ) {
+                val liveIndex = visibleCandles.lastIndex
+                val x =
+                    left +
+                    slot * liveIndex +
+                    slot / 2f
+
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 2f
+                paint.color =
+                    if (live.close >= live.open)
+                        BULLISH_COLOR
+                    else
+                        BEARISH_COLOR
+
+                val liveTop =
+                    priceY(maxOf(live.open, live.close))
+
+                val liveBottom =
+                    priceY(minOf(live.open, live.close))
+
+                canvas.drawRect(
+                    x - bodyWidth / 2f,
+                    liveTop,
+                    x + bodyWidth / 2f,
+                    maxOf(liveBottom, liveTop + 2f),
+                    paint
+                )
+            }
         }
 
         // EMA20.
