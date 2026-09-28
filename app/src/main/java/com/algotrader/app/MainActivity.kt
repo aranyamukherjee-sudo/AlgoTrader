@@ -1644,24 +1644,59 @@ class TradingChartView(context: android.content.Context) : View(context) {
         invalidate()
     }
 
+    private fun candleBucketTimestamp(
+        timestampSeconds: Long,
+        interval: Long
+    ): Long {
+        if (interval >= 86400L) {
+            val zone =
+                java.time.ZoneId.of("Asia/Kolkata")
+
+            return java.time.Instant
+                .ofEpochSecond(timestampSeconds)
+                .atZone(zone)
+                .toLocalDate()
+                .atStartOfDay(zone)
+                .toEpochSecond()
+        }
+
+        return (timestampSeconds / interval) * interval
+    }
+
     fun setLatestPrice(price: Float) {
         if (!price.isFinite() || price <= 0f) return
 
         latestPrice = price
 
-        val interval = candleIntervalSeconds.coerceAtLeast(60L)
-        val nowSeconds = System.currentTimeMillis() / 1000L
-        val bucketTimestamp = (nowSeconds / interval) * interval
+        val interval =
+            candleIntervalSeconds.coerceAtLeast(60L)
 
-        if (candles.isEmpty()) {
-            val candle = Candle(
-                timestamp = bucketTimestamp,
-                open = price,
-                high = price,
-                low = price,
-                close = price,
-                volume = 0f
+        val nowSeconds =
+            System.currentTimeMillis() / 1000L
+
+        val bucketTimestamp =
+            candleBucketTimestamp(
+                nowSeconds,
+                interval
             )
+
+        /*
+         * No historical candles yet.
+         *
+         * Start a standalone live candle. Once historical
+         * data arrives, setData() will establish the normal
+         * historical -> live relationship.
+         */
+        if (candles.isEmpty()) {
+            val candle =
+                Candle(
+                    timestamp = bucketTimestamp,
+                    open = price,
+                    high = price,
+                    low = price,
+                    close = price,
+                    volume = 0f
+                )
 
             liveCandle = candle
             visibleCount = 1
@@ -1672,51 +1707,94 @@ class TradingChartView(context: android.content.Context) : View(context) {
             return
         }
 
-        val lastHistorical = candles.last()
-        val lastBucket =
-            (lastHistorical.timestamp / interval) * interval
+        val lastHistorical =
+            candles.last()
 
-        if (lastBucket == bucketTimestamp) {
-            // The historical response already contains the active candle.
-            // Update it directly with the live FYERS price.
-            val updated = lastHistorical.copy(
-                high = maxOf(lastHistorical.high, price),
-                low = minOf(lastHistorical.low, price),
-                close = price
+        val lastHistoricalBucket =
+            candleBucketTimestamp(
+                lastHistorical.timestamp,
+                interval
             )
 
-            candles = candles.dropLast(1) + updated
+        /*
+         * If historical data already contains the current
+         * candle bucket, update that candle directly.
+         *
+         * This prevents duplicate historical/live candles.
+         */
+        if (lastHistoricalBucket == bucketTimestamp) {
+
+            val existingLive =
+                liveCandle
+
+            val updated =
+                lastHistorical.copy(
+                    high =
+                        maxOf(
+                            lastHistorical.high,
+                            existingLive?.high ?: price,
+                            price
+                        ),
+                    low =
+                        minOf(
+                            lastHistorical.low,
+                            existingLive?.low ?: price,
+                            price
+                        ),
+                    close = price
+                )
+
+            candles =
+                candles.dropLast(1) + updated
+
             liveCandle = null
 
         } else {
-            // Keep a separate live candle. Its open is the latest known
-            // historical close and its OHLC then evolves with every tick.
-            val existing = liveCandle
+
+            /*
+             * A new timeframe bucket has started.
+             *
+             * First commit the previous standalone live candle
+             * to the historical series so it is never lost.
+             */
+            liveCandle?.let { completed ->
+
+                if (
+                    completed.timestamp >
+                    lastHistorical.timestamp
+                ) {
+                    candles =
+                        candles + completed
+                }
+            }
+
+            /*
+             * Start the new live candle from the latest known
+             * close. The first live price becomes its initial
+             * high/low/close.
+             */
+            val openPrice =
+                candles.last().close
 
             liveCandle =
-                if (
-                    existing != null &&
-                    existing.timestamp == bucketTimestamp
-                ) {
-                    existing.copy(
-                        high = maxOf(existing.high, price),
-                        low = minOf(existing.low, price),
-                        close = price
-                    )
-                } else {
-                    Candle(
-                        timestamp = bucketTimestamp,
-                        open = lastHistorical.close,
-                        high = maxOf(lastHistorical.close, price),
-                        low = minOf(lastHistorical.close, price),
-                        close = price,
-                        volume = 0f
-                    )
-                }
+                Candle(
+                    timestamp = bucketTimestamp,
+                    open = openPrice,
+                    high = maxOf(openPrice, price),
+                    low = minOf(openPrice, price),
+                    close = price,
+                    volume = 0f
+                )
         }
 
+        /*
+         * Only the latest-following viewport should advance
+         * automatically. A manually scrolled chart stays where
+         * the user left it.
+         */
         if (followLatest) {
-            endIndex = candles.lastIndex
+            endIndex =
+                candles.lastIndex
         }
 
         invalidate()
@@ -1733,18 +1811,25 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
         val left = 8f
         val right = width - 96f
-        val chartWidth = (right - left).coerceAtLeast(1f)
+        val chartWidth =
+            (right - left).coerceAtLeast(1f)
 
         when (event.actionMasked) {
 
             MotionEvent.ACTION_DOWN -> {
+
                 lastTouchX = event.x
                 lastTouchY = event.y
+
                 gestureStartX = event.x
                 gestureStartY = event.y
+
                 dragRemainderX = 0f
                 isDragging = false
 
+                // A fresh touch immediately selects the candle.
+                // Movement beyond touch-slop will transition this
+                // gesture into chart navigation.
                 crosshairIndex =
                     indexForX(
                         event.x,
@@ -1752,17 +1837,24 @@ class TradingChartView(context: android.content.Context) : View(context) {
                         chartWidth
                     )
 
+                parent?.requestDisallowInterceptTouchEvent(true)
+
                 invalidate()
                 return true
             }
 
             MotionEvent.ACTION_POINTER_DOWN -> {
+
+                // Multi-touch belongs to the scale detector.
                 parent?.requestDisallowInterceptTouchEvent(true)
+
                 return true
             }
 
             MotionEvent.ACTION_MOVE -> {
 
+                // Pinch gestures are handled exclusively by the
+                // ScaleGestureDetector.
                 if (
                     scaleDetector.isInProgress ||
                     event.pointerCount > 1
@@ -1771,26 +1863,55 @@ class TradingChartView(context: android.content.Context) : View(context) {
                     return true
                 }
 
-                val dx = event.x - lastTouchX
-                val dy = event.y - lastTouchY
+                val dx =
+                    event.x - lastTouchX
 
-                val totalDx = event.x - gestureStartX
-                val totalDy = event.y - gestureStartY
+                val dy =
+                    event.y - lastTouchY
 
+                val totalDx =
+                    event.x - gestureStartX
+
+                val totalDy =
+                    event.y - gestureStartY
+
+                /*
+                 * Before the drag threshold is crossed, this remains
+                 * a crosshair interaction rather than chart panning.
+                 */
                 if (!isDragging) {
-                    if (
-                        kotlin.math.abs(totalDx) >= 5f ||
-                        kotlin.math.abs(totalDy) >= 5f
-                    ) {
-                        isDragging = true
-                        followLatest = false
-                        parent?.requestDisallowInterceptTouchEvent(true)
-                    } else {
+
+                    val movement =
+                        kotlin.math.hypot(
+                            totalDx,
+                            totalDy
+                        )
+
+                    if (movement < 8f) {
+
+                        crosshairIndex =
+                            indexForX(
+                                event.x,
+                                left,
+                                chartWidth
+                            )
+
+                        invalidate()
                         return true
                     }
-                }
 
-                parent?.requestDisallowInterceptTouchEvent(true)
+                    /*
+                     * Touch-slop crossed: switch permanently into
+                     * viewport navigation for this gesture.
+                     */
+                    isDragging = true
+                    followLatest = false
+                    crosshairIndex = -1
+
+                    dragRemainderX = 0f
+
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                }
 
                 // --------------------------------------------------------
                 // X AXIS — time navigation.
@@ -1804,13 +1925,17 @@ class TradingChartView(context: android.content.Context) : View(context) {
                             .toFloat()
 
                 if (slot > 0f) {
+
                     val candleShift =
-                        (-dragRemainderX / slot).toInt()
+                        (-dragRemainderX / slot)
+                            .toInt()
 
                     if (candleShift != 0) {
+
                         endIndex =
                             (
-                                endIndex + candleShift
+                                endIndex +
+                                    candleShift
                             ).coerceIn(
                                 visibleCount - 1,
                                 candles.lastIndex
@@ -1823,21 +1948,18 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
                 // --------------------------------------------------------
                 // Y AXIS — price/value navigation.
-                //
-                // Dragging upward moves the viewed price area upward.
-                // Dragging downward moves it downward.
                 // --------------------------------------------------------
                 val historicalRange =
                     currentRawPriceRange()
 
                 if (historicalRange > 0f) {
+
                     val chartHeight =
                         (height - 46f)
                             .coerceAtLeast(1f)
 
-                    pricePanFraction -=
-                        dy /
-                        chartHeight
+                    pricePanFraction +=
+                        dy / chartHeight
 
                     pricePanFraction =
                         pricePanFraction.coerceIn(
@@ -1845,13 +1967,6 @@ class TradingChartView(context: android.content.Context) : View(context) {
                             3f
                         )
                 }
-
-                crosshairIndex =
-                    indexForX(
-                        event.x,
-                        left,
-                        chartWidth
-                    )
 
                 lastTouchX = event.x
                 lastTouchY = event.y
@@ -1862,16 +1977,22 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
             MotionEvent.ACTION_UP,
             MotionEvent.ACTION_CANCEL -> {
+
                 parent?.requestDisallowInterceptTouchEvent(false)
 
-                val wasDragging = isDragging
+                val wasDragging =
+                    isDragging
 
                 isDragging = false
                 dragRemainderX = 0f
 
-                if (event.actionMasked == MotionEvent.ACTION_UP) {
+                if (
+                    event.actionMasked ==
+                    MotionEvent.ACTION_UP
+                ) {
 
-                    val now = event.eventTime
+                    val now =
+                        event.eventTime
 
                     val tapDistance =
                         kotlin.math.hypot(
@@ -1912,16 +2033,32 @@ class TradingChartView(context: android.content.Context) : View(context) {
                         return true
                     }
 
+                    if (!wasDragging) {
+
+                        /*
+                         * A tap releases the selected candle and
+                         * leaves the crosshair visible.
+                         */
+                        crosshairIndex =
+                            indexForX(
+                                event.x,
+                                left,
+                                chartWidth
+                            )
+
+                    } else {
+
+                        /*
+                         * A completed drag remains a navigation
+                         * gesture. Do not accidentally select a
+                         * different candle on release.
+                         */
+                        crosshairIndex = -1
+                    }
+
                     lastTapTime = now
                     lastTapX = event.x
                     lastTapY = event.y
-
-                    crosshairIndex =
-                        indexForX(
-                            event.x,
-                            left,
-                            chartWidth
-                        )
                 }
 
                 invalidate()
