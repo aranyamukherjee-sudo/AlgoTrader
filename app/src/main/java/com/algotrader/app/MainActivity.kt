@@ -1403,6 +1403,10 @@ class TradingChartView(context: android.content.Context) : View(context) {
     private var dragRemainderX = 0f
     private var isDragging = false
 
+    // Long-press crosshair mode.
+    private var isLongPressing = false
+    private var longPressCancelled = false
+
     // Independent Y-axis viewport.
     // 1.0 = normal price scale.
     // >1 = zoomed into price movement.
@@ -1800,6 +1804,31 @@ class TradingChartView(context: android.content.Context) : View(context) {
         invalidate()
     }
 
+    private val longPressRunnable = Runnable {
+        if (
+            !longPressCancelled &&
+            !isDragging
+        ) {
+            isLongPressing = true
+
+            val left = 8f
+            val right = width - 96f
+            val chartWidth =
+                (right - left).coerceAtLeast(1f)
+
+            crosshairIndex =
+                indexForX(
+                    lastTouchX,
+                    left,
+                    chartWidth
+                )
+
+            parent?.requestDisallowInterceptTouchEvent(true)
+
+            invalidate()
+        }
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
 
         // Always pass every pointer event to the scale detector.
@@ -1826,6 +1855,14 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
                 dragRemainderX = 0f
                 isDragging = false
+                isLongPressing = false
+                longPressCancelled = false
+
+                removeCallbacks(longPressRunnable)
+                postDelayed(
+                    longPressRunnable,
+                    500L
+                )
 
                 // A fresh touch immediately selects the candle.
                 // Movement beyond touch-slop will transition this
@@ -1846,6 +1883,9 @@ class TradingChartView(context: android.content.Context) : View(context) {
             MotionEvent.ACTION_POINTER_DOWN -> {
 
                 // Multi-touch belongs to the scale detector.
+                longPressCancelled = true
+                removeCallbacks(longPressRunnable)
+
                 parent?.requestDisallowInterceptTouchEvent(true)
 
                 return true
@@ -1859,6 +1899,9 @@ class TradingChartView(context: android.content.Context) : View(context) {
                     scaleDetector.isInProgress ||
                     event.pointerCount > 1
                 ) {
+                    longPressCancelled = true
+                    removeCallbacks(longPressRunnable)
+
                     parent?.requestDisallowInterceptTouchEvent(true)
                     return true
                 }
@@ -1874,6 +1917,28 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
                 val totalDy =
                     event.y - gestureStartY
+
+                /*
+                 * Long-press mode:
+                 * keep the viewport fixed and move only the crosshair.
+                 */
+                if (isLongPressing) {
+
+                    crosshairIndex =
+                        indexForX(
+                            event.x,
+                            left,
+                            chartWidth
+                        )
+
+                    lastTouchX = event.x
+                    lastTouchY = event.y
+
+                    parent?.requestDisallowInterceptTouchEvent(true)
+
+                    invalidate()
+                    return true
+                }
 
                 /*
                  * Before the drag threshold is crossed, this remains
@@ -1907,6 +1972,9 @@ class TradingChartView(context: android.content.Context) : View(context) {
                     isDragging = true
                     followLatest = false
                     crosshairIndex = -1
+
+                    longPressCancelled = true
+                    removeCallbacks(longPressRunnable)
 
                     dragRemainderX = 0f
 
@@ -1978,12 +2046,19 @@ class TradingChartView(context: android.content.Context) : View(context) {
             MotionEvent.ACTION_UP,
             MotionEvent.ACTION_CANCEL -> {
 
+                removeCallbacks(longPressRunnable)
+
                 parent?.requestDisallowInterceptTouchEvent(false)
 
                 val wasDragging =
                     isDragging
 
+                val wasLongPressing =
+                    isLongPressing
+
                 isDragging = false
+                isLongPressing = false
+                longPressCancelled = true
                 dragRemainderX = 0f
 
                 if (
@@ -2002,6 +2077,7 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
                     val isDoubleTap =
                         !wasDragging &&
+                        !wasLongPressing &&
                         now - lastTapTime in 1L..350L &&
                         tapDistance <= 48f
 
@@ -2033,7 +2109,15 @@ class TradingChartView(context: android.content.Context) : View(context) {
                         return true
                     }
 
-                    if (!wasDragging) {
+                    if (wasLongPressing) {
+
+                        /*
+                         * Long press is a temporary inspection mode.
+                         * Release exits it cleanly.
+                         */
+                        crosshairIndex = -1
+
+                    } else if (!wasDragging) {
 
                         /*
                          * A tap releases the selected candle and
