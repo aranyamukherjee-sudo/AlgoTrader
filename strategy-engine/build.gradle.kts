@@ -7,6 +7,7 @@ kotlin {
 }
 
 dependencies {
+    testImplementation(kotlin("test"))
     implementation(project(":core:domain"))
     implementation(project(":core:strategy"))
     implementation(project(":core:marketdata"))

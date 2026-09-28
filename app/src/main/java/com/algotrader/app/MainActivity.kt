@@ -36,11 +36,13 @@ import java.util.TimeZone
 import java.util.concurrent.Executors
 
 import com.algotrader.backtest.BacktestConfig
-import com.algotrader.backtest.BacktestEngine
 import com.algotrader.backtest.BacktestResult
+import com.algotrader.backtest.StrategyBacktestRunner
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.strategy.CprEmaTrendStrategy
 import com.algotrader.strategy.DonchianEmaTrendStrategy
+import com.algotrader.strategyengine.StrategyFactory
+import com.algotrader.strategyengine.StrategyConfiguration
 import com.algotrader.app.ui.screens.MarketDataScreen
 import com.algotrader.app.ui.screens.ExecutionScreen
 import com.algotrader.app.ui.screens.BacktestScreen
@@ -1179,6 +1181,11 @@ class MainActivity : Activity() {
     }
 
     
+private var selectedBacktestConfigurations: List<StrategyConfiguration> = emptyList()
+private var selectedBacktestCapital: Double = 100_000.0
+private var selectedBacktestSizing: PositionSizing = PositionSizing.FixedQuantity(1.0)
+
+
 private fun runBacktest() {
     val uiCandles = candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]
 
@@ -1229,7 +1236,25 @@ private fun runBacktest() {
 
     content.removeAllViews()
 
-    val strategies = listOf(CprEmaTrendStrategy(), DonchianEmaTrendStrategy())
+    val strategyFactory = StrategyFactory()
+
+    if (selectedBacktestConfigurations.isEmpty()) {
+        selectedBacktestConfigurations = listOf(
+            "moving_average_crossover",
+            "rsi",
+            "macd",
+            "bollinger_bands",
+            "donchian_channel",
+            "donchian_ema",
+            "cpr_ema"
+        ).map { strategyId ->
+            StrategyConfiguration(strategyId)
+        }
+    }
+
+    val strategies = selectedBacktestConfigurations.map { configuration ->
+        strategyFactory.create(configuration)
+    }
 
     BacktestScreen.renderRunning(
         this,
@@ -1243,13 +1268,19 @@ private fun runBacktest() {
     Thread {
         try {
             val config = BacktestConfig(
-                initialCapital = 100_000.0,
-                positionSizing = PositionSizing.FixedQuantity(1.0)
+                initialCapital = selectedBacktestCapital,
+                positionSizing = selectedBacktestSizing
             )
 
-            val engine = BacktestEngine(config)
+            val runner = StrategyBacktestRunner(strategyFactory)
 
-            val results = strategies.map { strategy -> engine.run(strategy, domainCandles) }
+            val results = selectedBacktestConfigurations.map { configuration ->
+                runner.run(
+                    configuration = configuration,
+                    candles = domainCandles,
+                    backtestConfig = config
+                )
+            }
 
             runOnUiThread {
                 renderBacktestResults(results, domainCandles.size)
@@ -1300,8 +1331,21 @@ private fun showBacktest() {
         candleCount = candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]?.size ?: 0,
         initialCapital = 100_000.0,
         positionQuantity = 1.0,
-        strategies = listOf(CprEmaTrendStrategy(), DonchianEmaTrendStrategy())
-    ) {
+        strategies = StrategyFactory().let { factory ->
+            listOf(
+                "moving_average_crossover",
+                "rsi",
+                "macd",
+                "bollinger_bands",
+                "donchian_channel",
+                "donchian_ema",
+                "cpr_ema"
+            ).map { strategyId -> factory.create(strategyId) }
+        }
+    ) { configurations, capital, sizing ->
+        selectedBacktestConfigurations = configurations
+        selectedBacktestCapital = capital
+        selectedBacktestSizing = sizing
         runBacktest()
     }
 }
