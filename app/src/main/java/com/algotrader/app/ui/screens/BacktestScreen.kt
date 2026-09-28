@@ -7,8 +7,13 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.view.Gravity
 import android.view.View
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioGroup
+import android.widget.RadioButton
 import android.widget.TextView
+import android.widget.Toast
 import com.algotrader.app.theme.AltrixaColors
 import com.algotrader.app.theme.AltrixaDimens
 import com.algotrader.app.theme.dpToPx
@@ -25,10 +30,12 @@ import com.algotrader.app.ui.components.altrixaSectionHeader
 import com.algotrader.app.ui.components.altrixaStatusBadge
 import com.algotrader.app.ui.components.altrixaTitle
 import com.algotrader.backtest.BacktestResult
+import com.algotrader.backtest.PositionSizing
 import com.algotrader.backtest.BacktestTrade
 import com.algotrader.backtest.EquityPoint
 import com.algotrader.backtest.TradeDirection
 import com.algotrader.strategy.Strategy
+import com.algotrader.strategyengine.StrategyConfiguration
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -68,15 +75,66 @@ object BacktestScreen {
         initialCapital: Double,
         positionQuantity: Double,
         strategies: List<Strategy>,
-        onRunBacktest: () -> Unit
+        onRunBacktest: (
+            List<StrategyConfiguration>,
+            Double,
+            PositionSizing
+        ) -> Unit
     ) {
         header(context, container)
-        configurationCard(context, container, instrumentName, timeframe, candleCount, initialCapital, positionQuantity)
+        val sizingControls = configurationCard(
+            context,
+            container,
+            instrumentName,
+            timeframe,
+            candleCount,
+            initialCapital,
+            positionQuantity
+        )
         strategySelectionCard(context, container, strategies)
 
         container.addView(altrixaSectionHeader(context, "Run"))
         val runCard = altrixaCard(context)
-        val runButton = altrixaPrimaryButton(context, "RUN BACKTEST") { onRunBacktest() }
+        runCard.tag = "BACKTEST_RUN_CARD"
+
+        val runButton = altrixaPrimaryButton(context, "RUN BACKTEST") {
+            val configurations = collectConfigurations(context, container, strategies)
+            if (configurations.isEmpty()) return@altrixaPrimaryButton
+
+            val capital = sizingControls.capital.text.toString()
+                .trim()
+                .toDoubleOrNull()
+
+            if (capital == null || capital <= 0.0) {
+                Toast.makeText(
+                    context,
+                    "Initial capital must be greater than zero.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@altrixaPrimaryButton
+            }
+
+            val quantity = sizingControls.quantity.text.toString()
+                .trim()
+                .toDoubleOrNull()
+
+            if (quantity == null || quantity <= 0.0) {
+                Toast.makeText(
+                    context,
+                    "Position quantity must be greater than zero.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@altrixaPrimaryButton
+            }
+
+            val sizing = if (sizingControls.percentEquity.isChecked) {
+                PositionSizing.PercentOfEquity(quantity)
+            } else {
+                PositionSizing.FixedQuantity(quantity)
+            }
+
+            onRunBacktest(configurations, capital, sizing)
+        }
         runCard.addView(
             runButton,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -161,7 +219,7 @@ object BacktestScreen {
         testCard.addView(fieldRow(context, "Candles", "$candleCount"), matchWidth(context))
         testCard.addView(fieldRow(context, "Initial Capital", formatMoney(initialCapital)), matchWidth(context))
         testCard.addView(
-            fieldRow(context, "Position Sizing", "Fixed qty ${formatQuantity(positionQuantity)}"),
+            fieldRow(context, "Position Sizing", "Configured"),
             matchWidth(context)
         )
         container.addView(testCard, topGap(context))
@@ -193,6 +251,12 @@ object BacktestScreen {
         container.addView(altrixaLabel(context, "Strategy performance analysis"))
     }
 
+    private data class SizingControls(
+        val capital: EditText,
+        val quantity: EditText,
+        val percentEquity: RadioButton
+    )
+
     private fun configurationCard(
         context: Context,
         container: LinearLayout,
@@ -201,9 +265,11 @@ object BacktestScreen {
         candleCount: Int,
         initialCapital: Double,
         positionQuantity: Double
-    ) {
+    ): SizingControls {
         container.addView(altrixaSectionHeader(context, "Configuration"))
+
         val card = altrixaCard(context)
+
         card.addView(fieldRow(context, "Instrument", instrumentName), matchWidth(context))
         card.addView(fieldRow(context, "Timeframe", timeframe), matchWidth(context))
         card.addView(
@@ -214,38 +280,294 @@ object BacktestScreen {
             ),
             matchWidth(context)
         )
-        card.addView(fieldRow(context, "Initial Capital", formatMoney(initialCapital)), matchWidth(context))
+
         card.addView(
-            fieldRow(context, "Position Sizing", "Fixed qty ${formatQuantity(positionQuantity)}"),
-            matchWidth(context)
+            altrixaLabel(context, "Initial Capital"),
+            matchWidth(context, topMargin = AltrixaDimens.spaceSm)
         )
+
+        val capital = EditText(context).apply {
+            setText(initialCapital.toString())
+            setSingleLine(true)
+            inputType =
+                android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+            textSize = AltrixaDimens.textBody
+            setTextColor(AltrixaColors.textPrimary)
+            setSelectAllOnFocus(true)
+        }
+
+        card.addView(
+            capital,
+            matchWidth(context, topMargin = AltrixaDimens.spaceXs)
+        )
+
+        card.addView(
+            altrixaLabel(context, "Position Size"),
+            matchWidth(context, topMargin = AltrixaDimens.spaceSm)
+        )
+
+        val quantity = EditText(context).apply {
+            setText(positionQuantity.toString())
+            setSingleLine(true)
+            inputType =
+                android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+            textSize = AltrixaDimens.textBody
+            setTextColor(AltrixaColors.textPrimary)
+            setSelectAllOnFocus(true)
+        }
+
+        card.addView(
+            quantity,
+            matchWidth(context, topMargin = AltrixaDimens.spaceXs)
+        )
+
+        val sizingGroup = RadioGroup(context).apply {
+            orientation = RadioGroup.HORIZONTAL
+        }
+
+        val fixed = RadioButton(context).apply {
+            text = "Fixed Quantity"
+            textSize = AltrixaDimens.textBody
+            setTextColor(AltrixaColors.textPrimary)
+            isChecked = true
+        }
+
+        val percentEquity = RadioButton(context).apply {
+            text = "% of Equity"
+            textSize = AltrixaDimens.textBody
+            setTextColor(AltrixaColors.textPrimary)
+        }
+
+        sizingGroup.addView(
+            fixed,
+            RadioGroup.LayoutParams(
+                0,
+                RadioGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        sizingGroup.addView(
+            percentEquity,
+            RadioGroup.LayoutParams(
+                0,
+                RadioGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        )
+
+        card.addView(
+            sizingGroup,
+            matchWidth(context, topMargin = AltrixaDimens.spaceXs)
+        )
+
         card.addView(
             altrixaLabel(
                 context,
-                "Data range uses whatever candles are currently loaded for this instrument/timeframe on Home \u2014 there is no separate date-range picker yet."
+                "For % of Equity, the value is the percentage of current equity allocated to each new position."
+            ),
+            matchWidth(context, topMargin = AltrixaDimens.spaceXs)
+        )
+
+        card.addView(
+            altrixaLabel(
+                context,
+                "Data range uses the candles currently loaded for this instrument/timeframe."
             ),
             matchWidth(context, topMargin = AltrixaDimens.spaceSm)
         )
+
         container.addView(card, topGap(context))
+
+        return SizingControls(
+            capital = capital,
+            quantity = quantity,
+            percentEquity = percentEquity
+        )
     }
 
     private fun strategySelectionCard(context: Context, container: LinearLayout, strategies: List<Strategy>) {
         container.addView(altrixaSectionHeader(context, "Strategies"))
+
         strategies.forEach { strategy ->
             val card = altrixaCard(context)
-            val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-            row.addView(
-                altrixaLabel(context, strategy.name),
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            )
+
+            val selected = CheckBox(context).apply {
+                text = strategy.name
+                textSize = AltrixaDimens.textBody
+                setTextColor(AltrixaColors.textPrimary)
+                isChecked = true
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+            }
+
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            row.addView(selected)
             row.addView(altrixaStatusBadge(context, "READY", AltrixaTone.ACCENT))
             card.addView(row, matchWidth(context))
+
             card.addView(
                 altrixaLabel(context, strategy.metadata.description),
                 matchWidth(context, topMargin = AltrixaDimens.spaceXs)
             )
+
+            val parameterFields = linkedMapOf<String, EditText>()
+
+            if (strategy.metadata.parameters.isNotEmpty()) {
+                card.addView(
+                    altrixaLabel(context, "Parameters"),
+                    matchWidth(context, topMargin = AltrixaDimens.spaceSm)
+                )
+
+                strategy.metadata.parameters.forEach { parameter ->
+                    val parameterRow = LinearLayout(context).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                    }
+
+                    parameterRow.addView(
+                        altrixaLabel(context, parameter.name),
+                        LinearLayout.LayoutParams(
+                            0,
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            1f
+                        )
+                    )
+
+                    val field = EditText(context).apply {
+                        setText(parameter.value.toString())
+                        setSingleLine(true)
+                        inputType =
+                            android.text.InputType.TYPE_CLASS_NUMBER or
+                            android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL or
+                            android.text.InputType.TYPE_NUMBER_FLAG_SIGNED
+                        textSize = AltrixaDimens.textBody
+                        setTextColor(AltrixaColors.textPrimary)
+                        setSelectAllOnFocus(true)
+                    }
+
+                    parameterFields[parameter.name] = field
+
+                    parameterRow.addView(
+                        field,
+                        LinearLayout.LayoutParams(
+                            context.dpToPx(96),
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+
+                    card.addView(
+                        parameterRow,
+                        matchWidth(context, topMargin = AltrixaDimens.spaceXs)
+                    )
+                }
+            }
+
+            selected.setTag(parameterFields)
+            selected.setOnCheckedChangeListener { _, checked ->
+                parameterFields.values.forEach { it.isEnabled = checked }
+            }
+
             container.addView(card, topGap(context))
         }
+
+        container.addView(
+            altrixaLabel(
+                context,
+                "Select one or more strategies. Parameters use the strategy's configured defaults and can be adjusted before running."
+            ),
+            matchWidth(context, topMargin = AltrixaDimens.spaceSm)
+        )
+
+        // Store strategy controls on the container so the Run button can
+        // collect the exact configurations currently displayed.
+        container.setTag(strategies)
+
+        val originalRunSection = container.findViewWithTag<LinearLayout>("BACKTEST_RUN_CARD")
+        if (originalRunSection != null) return
+
+        // The actual collection happens in the Run section through the
+        // strategy cards' child controls.
+    }
+
+    private fun collectConfigurations(
+        context: Context,
+        container: LinearLayout,
+        strategies: List<Strategy>
+    ): List<StrategyConfiguration> {
+        val configurations = mutableListOf<StrategyConfiguration>()
+
+        strategies.forEachIndexed { index, strategy ->
+            val card = container.getChildAt(
+                // Header, subtitle, configuration section/card, and
+                // Strategies section header occupy the first five children.
+                // The first strategy card therefore starts at child 5.
+                5 + index
+            )
+
+            if (card !is LinearLayout) return@forEachIndexed
+
+            val row = card.getChildAt(0) as? LinearLayout ?: return@forEachIndexed
+            val checkbox = row.getChildAt(0) as? CheckBox ?: return@forEachIndexed
+
+            if (!checkbox.isChecked) return@forEachIndexed
+
+            @Suppress("UNCHECKED_CAST")
+            val fields = checkbox.tag as? Map<String, EditText> ?: emptyMap()
+
+            val parameters = mutableMapOf<String, Double>()
+
+            strategy.metadata.parameters.forEach { parameter ->
+                val field = fields[parameter.name]
+                val value = field?.text?.toString()?.trim()?.toDoubleOrNull()
+
+                if (value == null) {
+                    Toast.makeText(
+                        context,
+                        "Invalid ${parameter.name} for ${strategy.name}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return emptyList()
+                }
+
+                parameters[parameter.name] = value
+            }
+
+            configurations += StrategyConfiguration(
+                strategyId = strategyIdFor(strategy),
+                parameters = parameters
+            )
+        }
+
+        if (configurations.isEmpty()) {
+            Toast.makeText(
+                context,
+                "Select at least one strategy.",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+
+        return configurations
+    }
+
+    private fun strategyIdFor(strategy: Strategy): String = when (strategy.name) {
+        "Moving Average Crossover" -> "moving_average_crossover"
+        "RSI" -> "rsi"
+        "MACD" -> "macd"
+        "Bollinger Bands" -> "bollinger_bands"
+        "Donchian Channel Breakout" -> "donchian_channel"
+        "Donchian + EMA Trend" -> "donchian_ema"
+        "CPR + EMA Trend" -> "cpr_ema"
+        else -> error("Unregistered strategy: ${strategy.name}")
     }
 
     private fun resultsEmptySection(context: Context, container: LinearLayout) {
