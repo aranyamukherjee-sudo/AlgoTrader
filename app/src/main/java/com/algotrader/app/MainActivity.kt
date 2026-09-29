@@ -88,7 +88,7 @@ class MainActivity : Activity() {
         private val TIMEFRAMES = listOf("5m", "15m", "30m", "1h", "1D")
 
         // Persistent historical-candle disk cache.
-        private const val HISTORY_CACHE_SCHEMA_VERSION = 1
+        private const val HISTORY_CACHE_SCHEMA_VERSION = 2
         private const val HISTORY_CACHE_DIR_NAME = "history_cache"
         // Mirrors the backend's own /history cache TTL, so we don't refresh
         // more often than the backend data could actually change.
@@ -121,9 +121,11 @@ class MainActivity : Activity() {
     private val candlesByInstrument = mutableMapOf<String, List<Candle>>()
     // Latest live LTP received over the websocket, per backend symbol.
     private val liveLtpByInstrument = mutableMapOf<String, Double>()
-    // Reference price for computing the header's +/- change, captured from the
-    // oldest candle in the currently loaded window (real data, not synthetic).
-    private var homeBaselineOpen: Float = 0f
+    // Previous trading day's close used as the header's daily Change/% Change
+    // reference. This is intentionally independent of the selected intraday
+    // chart timeframe and the live LTP.
+    private var homePreviousDayClose: Float = 0f
+    private val previousCloseLoadInFlight = mutableSetOf<String>()
 
     // Views on the Home screen that get updated in place (no full rebuild) when
     // live ticks or history responses arrive, so we don't re-layout on every tick.
@@ -171,6 +173,115 @@ class MainActivity : Activity() {
      *      we also kick a silent background refresh from the backend.
      *   3. Backend "/history" (cold miss — shows the normal loading status).
      */
+    /**
+     * Ensures the existing daily-history cache is available for the header.
+     * Intraday charts still render independently and are never blocked by this.
+     */
+    private fun ensurePreviousDayCloseLoaded(instrument: InstrumentInfo) {
+        val symbol = instrument.backendSymbol
+        val dailyKey = "$symbol|1D"
+
+        candlesByInstrument[dailyKey]?.let { daily ->
+            if (daily.size >= 1) {
+                updatePreviousDayCloseFromDaily(symbol, daily)
+                return
+            }
+        }
+
+        if (!previousCloseLoadInFlight.add(symbol)) {
+            return
+        }
+
+        diskCacheExecutor.execute {
+            val diskEntry = readDiskCache(symbol, "1D")
+
+            runOnUiThread {
+                if (diskEntry != null && diskEntry.candles.isNotEmpty()) {
+                    candlesByInstrument[dailyKey] = diskEntry.candles
+                    previousCloseLoadInFlight.remove(symbol)
+                    updatePreviousDayCloseFromDaily(symbol, diskEntry.candles)
+
+                    val age = System.currentTimeMillis() - diskEntry.savedAt
+                    if (age >= DISK_CACHE_TTL_MS) {
+                        fetchHistoryFromBackend(
+                            instrument = instrument,
+                            requestedSymbol = symbol,
+                            requestedTimeframe = "1D",
+                            cacheKey = dailyKey,
+                            showLoadingStatus = false
+                        )
+                    }
+                } else {
+                    fetchHistoryFromBackend(
+                        instrument = instrument,
+                        requestedSymbol = symbol,
+                        requestedTimeframe = "1D",
+                        cacheKey = dailyKey,
+                        showLoadingStatus = false
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Updates the header baseline from daily candles.
+     * The latest daily candle is the current trading day when present, so
+     * the preceding daily candle is the previous trading day's close.
+     */
+    /**
+     * Sets the header baseline to the latest completed trading day's close.
+     *
+     * We explicitly compare the candle's IST date with today's IST date.
+     * This avoids assuming that candles[size - 2] is always yesterday.
+     *
+     * Header calculation:
+     * Change = Live LTP - Previous Trading Day Close
+     */
+    private fun updatePreviousDayCloseFromDaily(
+        symbol: String,
+        candles: List<Candle>
+    ) {
+        if (candles.isEmpty()) {
+            return
+        }
+
+        val ist = java.time.ZoneId.of("Asia/Kolkata")
+        val today = java.time.LocalDate.now(ist)
+
+        val previousTradingDay = candles
+            .asSequence()
+            .sortedByDescending { it.timestamp }
+            .mapNotNull { candle ->
+                val candleDate = try {
+                    java.time.Instant.ofEpochSecond(candle.timestamp)
+                        .atZone(ist)
+                        .toLocalDate()
+                } catch (_: Exception) {
+                    null
+                }
+
+                if (candleDate != null && candleDate.isBefore(today)) {
+                    candle
+                } else {
+                    null
+                }
+            }
+            .firstOrNull()
+
+        if (previousTradingDay == null) {
+            return
+        }
+
+        homePreviousDayClose = previousTradingDay.close
+
+        if (isHomeScreenActive &&
+            selectedInstrument.backendSymbol == symbol
+        ) {
+            updateHeaderPrice()
+        }
+    }
+
     private fun loadHistoryForSelected() {
         val instrument = selectedInstrument
         val requestedSymbol = instrument.backendSymbol
@@ -182,6 +293,9 @@ class MainActivity : Activity() {
             if (cached.isNotEmpty()) {
                 setHeaderStatus(null)
                 renderHomeData(cached)
+                if (requestedTimeframe != "1D") {
+                    ensurePreviousDayCloseLoaded(instrument)
+                }
                 return
             }
         }
@@ -201,6 +315,9 @@ class MainActivity : Activity() {
                     candlesByInstrument[cacheKey] = diskEntry.candles
                     setHeaderStatus(null)
                     renderHomeData(diskEntry.candles)
+                    if (requestedTimeframe != "1D") {
+                        ensurePreviousDayCloseLoaded(instrument)
+                    }
 
                     val age = System.currentTimeMillis() - diskEntry.savedAt
                     if (age >= DISK_CACHE_TTL_MS) {
@@ -326,6 +443,11 @@ class MainActivity : Activity() {
                             return
                         }
 
+                        // FYERS history should be chronological, but normalize
+                        // the series before caching so a reversed response can
+                        // never produce a reversed chart/date range.
+                        candles.sortBy { it.timestamp }
+
                         // Cache by both instrument and timeframe (memory).
                         candlesByInstrument[cacheKey] = candles
 
@@ -336,9 +458,21 @@ class MainActivity : Activity() {
                         }
 
                         runOnUiThread {
+                            previousCloseLoadInFlight.remove(requestedSymbol)
+
+                            if (requestedTimeframe == "1D") {
+                                updatePreviousDayCloseFromDaily(
+                                    requestedSymbol,
+                                    candles
+                                )
+                            }
+
                             if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
                                 setHeaderStatus(null)
                                 renderHomeData(candles)
+                                if (requestedTimeframe != "1D") {
+                                    ensurePreviousDayCloseLoaded(instrument)
+                                }
                             }
                         }
 
@@ -370,6 +504,72 @@ class MainActivity : Activity() {
         // Sanitize so ":" and other symbol characters can never break the path.
         val safeName = "${symbol}_$timeframe".replace(Regex("[^A-Za-z0-9_.-]"), "_")
         return File(historyCacheDir(), "$safeName.json")
+    }
+
+    /**
+     * Returns the expected candle interval in seconds for a cached
+     * timeframe. This is used to reject stale/incorrect candle data
+     * that may have been written by an older implementation.
+     */
+    private fun expectedCandleIntervalSeconds(timeframe: String): Long {
+        return when (timeframe) {
+            "5m" -> 300L
+            "15m" -> 900L
+            "30m" -> 1800L
+            "1h" -> 3600L
+            "1D" -> 86400L
+            else -> 0L
+        }
+    }
+
+    /**
+     * Validates that cached candles actually match the requested
+     * timeframe. A small tolerance is allowed because market data
+     * can contain gaps outside trading hours, but consecutive
+     * candles must never be compressed into daily spacing for an
+     * intraday timeframe.
+     */
+    private fun candlesMatchTimeframe(
+        candles: List<Candle>,
+        timeframe: String
+    ): Boolean {
+        if (candles.size < 2) return true
+
+        if (timeframe == "1D") {
+            return true
+        }
+
+        val expected = expectedCandleIntervalSeconds(timeframe)
+        if (expected <= 0L) return false
+
+        var validIntervals = 0
+        var invalidIntervals = 0
+
+        for (i in 1 until candles.size) {
+            val delta =
+                candles[i].timestamp - candles[i - 1].timestamp
+
+            if (delta == expected.toLong()) {
+                validIntervals++
+            } else {
+                /*
+                 * Trading sessions naturally contain overnight and
+                 * weekend gaps. Those are valid. What is not valid
+                 * is a spacing smaller than the requested interval
+                 * or a whole dataset collapsing to daily candles.
+                 */
+                if (delta < expected) {
+                    invalidIntervals++
+                }
+            }
+        }
+
+        /*
+         * Reject any cache containing a candle spacing smaller than
+         * the requested timeframe. Also reject a dataset where no
+         * normal interval exists at all.
+         */
+        return invalidIntervals == 0 && validIntervals > 0
     }
 
     /**
@@ -427,6 +627,17 @@ class MainActivity : Activity() {
             }
 
             if (candles.isEmpty()) {
+                file.delete()
+                return null
+            }
+
+            // Always keep the historical series chronological.
+            candles.sortBy { it.timestamp }
+
+            if (!candlesMatchTimeframe(candles, timeframe)) {
+                // Cache contains candles at the wrong timeframe.
+                // Delete it so the caller performs a fresh backend
+                // request using the selected resolution.
                 file.delete()
                 return null
             }
@@ -1064,28 +1275,54 @@ class MainActivity : Activity() {
     private fun renderHomeData(candles: List<Candle>) {
         if (!isHomeScreenActive) return
 
-        val closes = candles.map { it.close }
+        // Rendering boundary: charts and indicators always receive
+        // candles in chronological order.
+        val orderedCandles = candles.sortedBy { it.timestamp }
+
+        val closes = orderedCandles.map { it.close }
         val ema20 = computeEma(closes, 20)
         val ema50 = computeEma(closes, 50)
         val rsi = computeRsi(closes, 14)
         val isDaily = selectedTimeframe == "1D"
 
         mainChartView?.setData(
-            candles = candles,
+            candles = orderedCandles,
             ema20 = ema20,
             ema50 = ema50,
             isDaily = isDaily,
             candleIntervalSeconds = timeframeToSeconds(selectedTimeframe)
         )
-        volumeChartView?.setData(candles)
+        volumeChartView?.setData(orderedCandles)
         rsiChartView?.setData(rsi)
 
-        homeBaselineOpen = candles.first().open
+        // Header Change/% Change baseline:
+        // Use the previous trading day's CLOSE, not today's opening price and
+        // not the last intraday candle close. For intraday timeframes, obtain
+        // the daily candles from the existing in-memory cache when available.
+        //
+        // This keeps the live LTP and chart candle streams independent while
+        // matching the standard market-data convention:
+        // Change = LTP - previous trading day's close.
+        val dailyKey = "${selectedInstrument.backendSymbol}|1D"
+        val dailyCandles = candlesByInstrument[dailyKey]
+            ?.sortedBy { it.timestamp }
+
+        if (!dailyCandles.isNullOrEmpty()) {
+            updatePreviousDayCloseFromDaily(
+                selectedInstrument.backendSymbol,
+                dailyCandles
+            )
+        } else if (isDaily) {
+            updatePreviousDayCloseFromDaily(
+                selectedInstrument.backendSymbol,
+                orderedCandles
+            )
+        }
 
         headerTitleLabel?.text = "${selectedInstrument.displayName} · $selectedTimeframe"
         updateHeaderPrice()
 
-        val latestCandle = candles.last()
+        val latestCandle = orderedCandles.last()
         ohlcOpenValue?.text = formatNumber(latestCandle.open)
         ohlcHighValue?.text = formatNumber(latestCandle.high)
         ohlcLowValue?.text = formatNumber(latestCandle.low)
@@ -1098,8 +1335,8 @@ class MainActivity : Activity() {
         }
         dateFormat.timeZone = TimeZone.getTimeZone("Asia/Kolkata")
 
-        val start = dateFormat.format(Date(candles.first().timestamp * 1000L))
-        val end = dateFormat.format(Date(candles.last().timestamp * 1000L))
+        val start = dateFormat.format(Date(orderedCandles.first().timestamp * 1000L))
+        val end = dateFormat.format(Date(orderedCandles.last().timestamp * 1000L))
         timeRangeLabel?.text = "$start  →  $end  (IST)"
     }
 
@@ -1134,7 +1371,8 @@ class MainActivity : Activity() {
             else -> return
         }
 
-        val baseline = if (homeBaselineOpen > 0f) homeBaselineOpen else price
+        val baseline =
+            if (homePreviousDayClose > 0f) homePreviousDayClose else price
         val change = price - baseline
         val pct = if (baseline != 0f) change / baseline * 100f else 0f
 
@@ -1432,6 +1670,16 @@ class TradingChartView(context: android.content.Context) : View(context) {
     private var latestPrice: Float? = null
     private var candleIntervalSeconds = 300L
 
+    // Live countdown for the currently forming candle.
+    // The timer is rendered beside the live LTP marker and refreshed
+    // once per second without changing any chart interaction state.
+    private val candleCountdownRunnable = object : Runnable {
+        override fun run() {
+            invalidate()
+            postDelayed(this, 1000L)
+        }
+    }
+
     private var visibleCount = 80
     private var endIndex = 0
     private var crosshairIndex = -1
@@ -1502,6 +1750,35 @@ class TradingChartView(context: android.content.Context) : View(context) {
         color = Color.WHITE
         textSize = 19f
         textAlign = Paint.Align.LEFT
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        removeCallbacks(candleCountdownRunnable)
+        post(candleCountdownRunnable)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(candleCountdownRunnable)
+        super.onDetachedFromWindow()
+    }
+
+    private fun candleCountdownText(): String {
+        val interval = candleIntervalSeconds.coerceAtLeast(60L)
+        val nowSeconds = System.currentTimeMillis() / 1000L
+        val bucket = candleBucketTimestamp(nowSeconds, interval)
+        val remaining = (bucket + interval - nowSeconds)
+            .coerceIn(0L, interval)
+
+        val minutes = remaining / 60L
+        val seconds = remaining % 60L
+
+        return String.format(
+            Locale.US,
+            "%02d:%02d",
+            minutes,
+            seconds
+        )
     }
 
     private val scaleDetector =
@@ -2566,6 +2843,8 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
             val y = priceY(price)
 
+            // Live LTP is intentionally drawn independently from the
+            // completed candle series. Do NOT modify candle OHLC data.
             dashedPaint.color =
                 PRICE_LINE_COLOR
 
@@ -2577,15 +2856,18 @@ class TradingChartView(context: android.content.Context) : View(context) {
                 dashedPaint
             )
 
+            // Live LTP badge.
+            // This represents the real-time quote, not the last candle close.
             paint.style = Paint.Style.FILL
-            paint.color =
-                PRICE_LINE_COLOR
+            paint.color = PRICE_LINE_COLOR
 
-            canvas.drawRect(
+            canvas.drawRoundRect(
                 right,
-                y - 16f,
+                y - 17f,
                 width.toFloat(),
-                y + 16f,
+                y + 17f,
+                4f,
+                4f,
                 paint
             )
 
@@ -2599,11 +2881,53 @@ class TradingChartView(context: android.content.Context) : View(context) {
                     "%,.2f",
                     price
                 ),
-                right + 8f,
-                y + 9f,
+                right + 7f,
+                y + 8f,
                 textPaint
             )
 
+            // Candle countdown badge.
+            // Keep it close to the LTP while clamping it inside the
+            // chart so it never gets clipped at the top/bottom.
+            val timerText = candleCountdownText()
+            val timerWidth = 58f
+            val timerHeight = 22f
+
+            val timerLeft =
+                (width.toFloat() - timerWidth)
+                    .coerceAtLeast(right)
+
+            val timerCenterY =
+                (y - 29f)
+                    .coerceIn(
+                        top + timerHeight / 2f,
+                        bottom - timerHeight / 2f
+                    )
+
+            paint.color = 0xDD151A21.toInt()
+
+            canvas.drawRoundRect(
+                timerLeft,
+                timerCenterY - timerHeight / 2f,
+                width.toFloat(),
+                timerCenterY + timerHeight / 2f,
+                6f,
+                6f,
+                paint
+            )
+
+            textPaint.color = PRICE_LINE_COLOR
+            textPaint.textSize = 18f
+            textPaint.textAlign = Paint.Align.CENTER
+
+            canvas.drawText(
+                timerText,
+                (timerLeft + width.toFloat()) / 2f,
+                timerCenterY + 6f,
+                textPaint
+            )
+
+            textPaint.textSize = 26f
             textPaint.color =
                 AXIS_TEXT_COLOR
         }
