@@ -119,6 +119,9 @@ class MainActivity : Activity() {
     // Historical candles cached by backend symbol + timeframe.
     // Example key: "NSE:NIFTY50-INDEX|1h"
     private val candlesByInstrument = mutableMapOf<String, List<Candle>>()
+
+    // Prevent duplicate intraday history refreshes while a request is active.
+    private val intradayRefreshInFlight = mutableSetOf<String>()
     // Latest live LTP received over the websocket, per backend symbol.
     private val liveLtpByInstrument = mutableMapOf<String, Double>()
     // Previous trading day's close used as the header's daily Change/% Change
@@ -708,6 +711,145 @@ class MainActivity : Activity() {
             timeframe == selectedTimeframe
     }
 
+    /**
+     * Refreshes recent intraday candles when the live market has advanced
+     * beyond the latest candle currently held in memory.
+     *
+     * The normal history loader intentionally keeps its 365-day request.
+     * This method only requests the most recent 5 days, then merges those
+     * authoritative OHLCV candles into the existing long history.
+     *
+     * WebSocket LTP remains responsible for the live price marker/current
+     * candle between backend history refreshes.
+     */
+    private fun refreshIntradayHistoryIfNeeded(instrument: InstrumentInfo) {
+        val timeframe = selectedTimeframe
+        if (!isHomeScreenActive || timeframe == "1D") return
+
+        val cacheKey = "${instrument.backendSymbol}|$timeframe"
+        val cached = candlesByInstrument[cacheKey] ?: return
+        if (cached.isEmpty()) return
+
+        val interval = timeframeToSeconds(timeframe)
+        if (interval <= 0L) return
+
+        val nowSeconds = System.currentTimeMillis() / 1000L
+        val currentBucket = (nowSeconds / interval) * interval
+        val latestCachedBucket =
+            (cached.last().timestamp / interval) * interval
+
+        // Nothing is missing yet.
+        if (currentBucket <= latestCachedBucket) return
+
+        // Avoid multiple refresh requests during the same gap.
+        if (!intradayRefreshInFlight.add(cacheKey)) return
+
+        val resolution = timeframeResolution()
+        val request = Request.Builder()
+            .url(
+                "$BACKEND_HTTP_BASE/history" +
+                    "?symbol=${instrument.backendSymbol}" +
+                    "&resolution=$resolution&days=5"
+            )
+            .build()
+
+        wsClient.newCall(request).enqueue(object : okhttp3.Callback {
+
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                intradayRefreshInFlight.remove(cacheKey)
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: Response) {
+                response.use {
+                    try {
+                        if (!response.isSuccessful) return
+
+                        val body = response.body?.string() ?: return
+                        val root = JSONObject(body)
+                        val array = root.optJSONArray("candles") ?: return
+
+                        val fresh = mutableListOf<Candle>()
+
+                        for (i in 0 until array.length()) {
+                            val candle = array.optJSONArray(i) ?: continue
+
+                            if (candle.length() >= 5) {
+                                fresh.add(
+                                    Candle(
+                                        timestamp = candle.optLong(0),
+                                        open = candle.getDouble(1).toFloat(),
+                                        high = candle.getDouble(2).toFloat(),
+                                        low = candle.getDouble(3).toFloat(),
+                                        close = candle.getDouble(4).toFloat(),
+                                        volume = if (candle.length() >= 6) {
+                                            candle.optDouble(5, 0.0).toFloat()
+                                        } else {
+                                            0f
+                                        }
+                                    )
+                                )
+                            }
+                        }
+
+                        if (fresh.isEmpty()) {
+                            intradayRefreshInFlight.remove(cacheKey)
+                            return
+                        }
+
+                        fresh.sortBy { it.timestamp }
+
+                        runOnUiThread {
+                            try {
+                                if (!isStillCurrentSelection(
+                                        instrument.backendSymbol,
+                                        timeframe
+                                    )
+                                ) {
+                                    return@runOnUiThread
+                                }
+
+                                val current = candlesByInstrument[cacheKey].orEmpty()
+
+                                // Fresh backend candles replace overlapping
+                                // timestamps while older cached history remains.
+                                val merged = (current + fresh)
+                                    .associateBy { it.timestamp }
+                                    .values
+                                    .sortedBy { it.timestamp }
+
+                                candlesByInstrument[cacheKey] = merged
+
+                                val savedAt = System.currentTimeMillis()
+                                diskCacheExecutor.execute {
+                                    writeDiskCache(
+                                        instrument.backendSymbol,
+                                        timeframe,
+                                        merged,
+                                        savedAt
+                                    )
+                                }
+
+                                renderHomeData(merged)
+
+                                // Re-apply the latest WebSocket LTP after
+                                // rendering so the live marker/current candle
+                                // remains visually live.
+                                liveLtpByInstrument[instrument.backendSymbol]
+                                    ?.let { updateHeaderPrice() }
+
+                            } finally {
+                                intradayRefreshInFlight.remove(cacheKey)
+                            }
+                        }
+
+                    } catch (_: Exception) {
+                        intradayRefreshInFlight.remove(cacheKey)
+                    }
+                }
+            }
+        })
+    }
+
     private fun connectQuotesWebSocket() {
         val request = Request.Builder()
             .url(BACKEND_WS_URL)
@@ -742,6 +884,11 @@ class MainActivity : Activity() {
                         runOnUiThread {
                             if (isHomeScreenActive) {
                                 updateHeaderPrice()
+
+                                // If the backend history has fallen behind the
+                                // live market bucket, quietly fill the gap
+                                // using authoritative OHLCV candles.
+                                refreshIntradayHistoryIfNeeded(selectedInstrument)
                             }
                         }
                     } catch (_: Exception) {
