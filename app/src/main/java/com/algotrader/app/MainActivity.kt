@@ -829,7 +829,10 @@ class MainActivity : Activity() {
                                     )
                                 }
 
-                                renderHomeData(merged)
+                                renderHomeData(
+                                    merged,
+                                    preserveChartViewport = true
+                                )
 
                                 // Re-apply the latest WebSocket LTP after
                                 // rendering so the live marker/current candle
@@ -1419,7 +1422,10 @@ class MainActivity : Activity() {
     }
 
     /** Refreshes chart, volume, RSI panels and the header from freshly loaded candles. */
-    private fun renderHomeData(candles: List<Candle>) {
+    private fun renderHomeData(
+        candles: List<Candle>,
+        preserveChartViewport: Boolean = false
+    ) {
         if (!isHomeScreenActive) return
 
         // Rendering boundary: charts and indicators always receive
@@ -1437,7 +1443,8 @@ class MainActivity : Activity() {
             ema20 = ema20,
             ema50 = ema50,
             isDaily = isDaily,
-            candleIntervalSeconds = timeframeToSeconds(selectedTimeframe)
+            candleIntervalSeconds = timeframeToSeconds(selectedTimeframe),
+            preserveViewport = preserveChartViewport
         )
         volumeChartView?.setData(orderedCandles)
         rsiChartView?.setData(rsi)
@@ -1917,6 +1924,32 @@ class TradingChartView(context: android.content.Context) : View(context) {
         val remaining = (bucket + interval - nowSeconds)
             .coerceIn(0L, interval)
 
+        /*
+         * NSE regular session ends at 15:30 IST.
+         * After the session closes, there is no active intraday
+         * candle countdown to display.
+         */
+        val marketZone =
+            java.time.ZoneId.of("Asia/Kolkata")
+
+        val nowIst =
+            java.time.Instant
+                .ofEpochMilli(System.currentTimeMillis())
+                .atZone(marketZone)
+
+        val marketClose =
+            nowIst
+                .toLocalDate()
+                .atTime(15, 30)
+                .atZone(marketZone)
+
+        if (
+            nowIst.isAfter(marketClose) ||
+            nowIst.isEqual(marketClose)
+        ) {
+            return ""
+        }
+
         val minutes = remaining / 60L
         val seconds = remaining % 60L
 
@@ -2091,7 +2124,8 @@ class TradingChartView(context: android.content.Context) : View(context) {
         ema20: List<Float>,
         ema50: List<Float>,
         isDaily: Boolean,
-        candleIntervalSeconds: Long = 300L
+        candleIntervalSeconds: Long = 300L,
+        preserveViewport: Boolean = false
     ) {
         this.candles = candles
         this.ema20 = ema20
@@ -2099,19 +2133,55 @@ class TradingChartView(context: android.content.Context) : View(context) {
         this.isDaily = isDaily
         this.candleIntervalSeconds = candleIntervalSeconds.coerceAtLeast(60L)
 
-        // Keep the default view readable on phone-sized screens.
-        // Users can still pinch to zoom out/in.
-        visibleCount =
-            minOf(50, candles.size.coerceAtLeast(1))
+        /*
+         * Initial loads and explicit timeframe changes establish a
+         * fresh latest-candle viewport.
+         *
+         * Background OHLCV refreshes must not destroy a viewport that
+         * the user is actively dragging/zooming.
+         */
+        if (!preserveViewport) {
+            // Keep the default view readable on phone-sized screens.
+            visibleCount =
+                minOf(50, candles.size.coerceAtLeast(1))
 
-        endIndex = candles.lastIndex
-        crosshairIndex = -1
-        followLatest = true
-        liveCandle = null
-        dragRemainderX = 0f
-        isDragging = false
-        priceZoom = 1f
-        pricePanFraction = 0f
+            endIndex = candles.lastIndex
+            crosshairIndex = -1
+            followLatest = true
+            liveCandle = null
+            dragRemainderX = 0f
+            isDragging = false
+            priceZoom = 1f
+            pricePanFraction = 0f
+        } else {
+            /*
+             * Preserve the user's navigation state while replacing
+             * the underlying candle data.
+             */
+            visibleCount =
+                visibleCount.coerceIn(
+                    1,
+                    candles.size.coerceAtLeast(1)
+                )
+
+            endIndex =
+                if (followLatest) {
+                    candles.lastIndex
+                } else {
+                    endIndex.coerceIn(
+                        visibleCount - 1,
+                        candles.lastIndex
+                    )
+                }
+
+            crosshairIndex =
+                crosshairIndex.coerceIn(
+                    -1,
+                    candles.lastIndex
+                )
+
+            liveCandle = null
+        }
 
         invalidate()
     }
