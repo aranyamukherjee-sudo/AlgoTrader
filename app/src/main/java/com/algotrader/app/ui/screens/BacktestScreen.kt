@@ -559,10 +559,10 @@ object BacktestScreen {
 
         strategies.forEachIndexed { index, strategy ->
             val card = container.getChildAt(
-                // Header, subtitle, configuration section/card, and
-                // Strategies section header occupy the first five children.
-                // The first strategy card therefore starts at child 5.
-                5 + index
+                // Header, subtitle, configuration section/card, Strategies
+                // section header, and Select All button occupy the first six
+                // children. The first strategy card therefore starts at child 6.
+                6 + index
             )
 
             if (card !is LinearLayout) return@forEachIndexed
