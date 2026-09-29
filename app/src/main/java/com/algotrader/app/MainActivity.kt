@@ -459,18 +459,49 @@ private var isHomeScreenActive = false
                             return
                         }
 
+                        // Treat backend history as untrusted input too.
+                        // Never allow malformed candles into memory or disk
+                        // cache, even if they arrived from a successful HTTP
+                        // response.
+                        val validCandles = candles.filter(::isValidCachedCandle).toMutableList()
+
+                        if (validCandles.isEmpty()) {
+                            runOnUiThread {
+                                if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
+                                    setHeaderStatus("Invalid candle data received")
+                                }
+                            }
+                            return
+                        }
+
                         // FYERS history should be chronological, but normalize
                         // the series before caching so a reversed response can
                         // never produce a reversed chart/date range.
-                        candles.sortBy { it.timestamp }
+                        validCandles.sortBy { it.timestamp }
+
+                        // Reject duplicate timestamps before the response can
+                        // become a persistent cache entry.
+                        if (validCandles.map { it.timestamp }.toSet().size != validCandles.size) {
+                            runOnUiThread {
+                                if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
+                                    setHeaderStatus("Invalid candle data received")
+                                }
+                            }
+                            return
+                        }
 
                         // Cache by both instrument and timeframe (memory).
-                        candlesByInstrument[cacheKey] = candles
+                        candlesByInstrument[cacheKey] = validCandles
 
                         // Persist to disk, atomically, off the main thread.
                         val savedAt = System.currentTimeMillis()
                         diskCacheExecutor.execute {
-                            writeDiskCache(requestedSymbol, requestedTimeframe, candles, savedAt)
+                            writeDiskCache(
+                                requestedSymbol,
+                                requestedTimeframe,
+                                validCandles,
+                                savedAt
+                            )
                         }
 
                         runOnUiThread {
