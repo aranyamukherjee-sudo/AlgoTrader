@@ -391,6 +391,33 @@ object BacktestScreen {
     private fun strategySelectionCard(context: Context, container: LinearLayout, strategies: List<Strategy>) {
         container.addView(altrixaSectionHeader(context, "Strategies"))
 
+        val strategyCheckboxes = mutableListOf<CheckBox>()
+
+        lateinit var selectAllToggle: TextView
+        selectAllToggle = altrixaSecondaryButton(context, "SELECT ALL") {
+            val selectAll = strategyCheckboxes.any { !it.isChecked }
+
+            strategyCheckboxes.forEach { checkbox ->
+                checkbox.isChecked = selectAll
+            }
+
+            selectAllToggle.text = if (strategyCheckboxes.all { it.isChecked }) {
+                "UNSELECT ALL"
+            } else {
+                "SELECT ALL"
+            }
+        }
+
+        container.addView(
+            selectAllToggle,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = AltrixaDimens.spaceXs
+            }
+        )
+
         strategies.forEach { strategy ->
             val card = altrixaCard(context)
 
@@ -475,9 +502,27 @@ object BacktestScreen {
             selected.setTag(parameterFields)
             selected.setOnCheckedChangeListener { _, checked ->
                 parameterFields.values.forEach { it.isEnabled = checked }
+
+                selectAllToggle.text = if (strategyCheckboxes.isNotEmpty() &&
+                    strategyCheckboxes.all { it.isChecked }
+                ) {
+                    "UNSELECT ALL"
+                } else {
+                    "SELECT ALL"
+                }
             }
 
+            strategyCheckboxes.add(selected)
+
             container.addView(card, topGap(context))
+        }
+
+        selectAllToggle.text = if (strategyCheckboxes.isNotEmpty() &&
+            strategyCheckboxes.all { it.isChecked }
+        ) {
+            "UNSELECT ALL"
+        } else {
+            "SELECT ALL"
         }
 
         container.addView(
