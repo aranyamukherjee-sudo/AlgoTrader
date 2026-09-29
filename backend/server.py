@@ -58,6 +58,11 @@ def on_message(message):
 
 AUTH_ERROR_CODES = {-8, -15, -16, -17, -99}
 
+# REST authentication is authoritative.
+# WebSocket "connected" only means the socket connection exists.
+AUTH_REQUIRED_STATE = "auth_required"
+AUTHENTICATED_STATE = "authenticated"
+
 
 def classify_fyers_error(error):
     code = None
@@ -81,9 +86,15 @@ def on_error(error):
     code = classify_fyers_error(error)
 
     if code in AUTH_ERROR_CODES:
-        fyers_status = "auth_expired"
+        fyers_status = AUTH_REQUIRED_STATE
+
+        # Prevent stale WebSocket prices from being presented as live
+        # market data after FYERS authentication has expired.
+        with lock:
+            latest_quotes.clear()
+
         print(
-            "FYERS authentication expired/invalid. "
+            "FYERS authentication required. "
             "Generate a fresh access token through FYERS OAuth.",
             flush=True,
         )
@@ -97,8 +108,7 @@ def on_close(message):
     print("FYERS CLOSED:", message, flush=True)
 
     # Never overwrite an authentication failure with "closed".
-    # This keeps /health truthful after an expired token.
-    if fyers_status == "auth_expired":
+    if fyers_status == AUTH_REQUIRED_STATE:
         return
 
     fyers_status = "closed"
@@ -110,8 +120,10 @@ def on_close(message):
 def on_open():
     global fyers_status, last_fyers_error
 
-    fyers_status = "connected"
-    last_fyers_error = None
+    # WebSocket connectivity does NOT prove REST authentication.
+    # Do not clear an existing authentication failure here.
+    if fyers_status != AUTH_REQUIRED_STATE:
+        fyers_status = "connected"
 
     print("FYERS WebSocket connected", flush=True)
 
@@ -123,6 +135,34 @@ def on_open():
     print("Subscribed:", SYMBOLS, flush=True)
 
     socket.keep_running()
+
+
+def mark_rest_auth_success():
+    global fyers_status, last_fyers_error
+
+    fyers_status = AUTHENTICATED_STATE
+    last_fyers_error = None
+
+
+def mark_rest_auth_failure(response):
+    global fyers_status, last_fyers_error
+
+    code = classify_fyers_error(response)
+
+    if code in AUTH_ERROR_CODES:
+        fyers_status = AUTH_REQUIRED_STATE
+        last_fyers_error = (
+            f"FYERS authentication required (code {code})"
+        )
+
+        print(
+            f"FYERS REST authentication failed: code={code}",
+            flush=True,
+        )
+
+        return True
+
+    return False
 
 
 def connect_fyers(access_token):
@@ -217,15 +257,40 @@ def startup():
 
 @app.get("/health")
 def health():
+    token_configured = bool(
+        os.getenv("FYERS_ACCESS_TOKEN")
+    )
+
     return {
         "status": "ok",
         "service": "AlgoTrader Market Data API",
         "fyers": fyers_status,
         "auth_mode": "oauth_access_token",
-        "access_token_configured": bool(
-            os.getenv("FYERS_ACCESS_TOKEN")
-        ),
+        "access_token_configured": token_configured,
+        "authenticated": fyers_status == AUTHENTICATED_STATE,
+        "auth_required": fyers_status == AUTH_REQUIRED_STATE,
         "last_error": last_fyers_error,
+    }
+
+
+@app.get("/auth/status")
+def auth_status():
+    token_configured = bool(
+        os.getenv("FYERS_ACCESS_TOKEN")
+    )
+
+    return {
+        "status": "ok",
+        "fyers": fyers_status,
+        "authenticated": fyers_status == AUTHENTICATED_STATE,
+        "auth_required": fyers_status == AUTH_REQUIRED_STATE,
+        "access_token_configured": token_configured,
+        "auth_mode": "oauth_access_token",
+        "message": (
+            "FYERS authentication required"
+            if fyers_status == AUTH_REQUIRED_STATE
+            else "FYERS authentication state available"
+        ),
     }
 
 
@@ -347,6 +412,8 @@ def history(
             response = history_client.history(data=data)
 
             if response.get("s") != "ok":
+                mark_rest_auth_failure(response)
+
                 return {
                     "status": "error",
                     "fyers": fyers_status,
@@ -354,6 +421,8 @@ def history(
                     "failed_range_from": data["range_from"],
                     "failed_range_to": data["range_to"],
                 }
+
+            mark_rest_auth_success()
 
             for candle in response.get("candles", []):
                 if candle and len(candle) >= 6:
