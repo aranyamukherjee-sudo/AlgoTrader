@@ -539,19 +539,82 @@ private var isHomeScreenActive = false
     }
 
     /**
+     * Validates one cached candle before it is allowed into the
+     * application cache. Cached data is untrusted input because it
+     * survives app restarts and may have been written by an older
+     * implementation or interrupted external process.
+     */
+    private fun isValidCachedCandle(candle: Candle): Boolean {
+        if (candle.timestamp <= 0L) return false
+
+        val values = listOf(
+            candle.open,
+            candle.high,
+            candle.low,
+            candle.close,
+            candle.volume
+        )
+
+        if (values.any { !it.isFinite() }) return false
+
+        if (candle.open <= 0f ||
+            candle.high <= 0f ||
+            candle.low <= 0f ||
+            candle.close <= 0f
+        ) {
+            return false
+        }
+
+        if (candle.volume < 0f) return false
+
+        if (candle.high < candle.low) return false
+
+        if (candle.open < candle.low ||
+            candle.open > candle.high ||
+            candle.close < candle.low ||
+            candle.close > candle.high
+        ) {
+            return false
+        }
+
+        return true
+    }
+
+    /**
      * Validates that cached candles actually match the requested
-     * timeframe. A small tolerance is allowed because market data
-     * can contain gaps outside trading hours, but consecutive
-     * candles must never be compressed into daily spacing for an
-     * intraday timeframe.
+     * timeframe. Overnight, weekend and holiday gaps are valid;
+     * compressed intervals are not.
      */
     private fun candlesMatchTimeframe(
         candles: List<Candle>,
         timeframe: String
     ): Boolean {
-        if (candles.size < 2) return true
+        if (candles.isEmpty()) return false
+
+        if (candles.any { !isValidCachedCandle(it) }) {
+            return false
+        }
+
+        /*
+         * Timestamps are normalized before this check. Duplicate
+         * timestamps are therefore always a cache corruption/error
+         * condition rather than a legitimate market-data gap.
+         */
+        val timestamps = candles.map { it.timestamp }
+        if (timestamps.toSet().size != timestamps.size) {
+            return false
+        }
 
         if (timeframe == "1D") {
+            return true
+        }
+
+        if (candles.size < 2) {
+            /*
+             * A single valid candle cannot prove its timeframe, so
+             * accept it rather than forcing an unnecessary network
+             * request for a minimally populated but valid cache.
+             */
             return true
         }
 
@@ -559,33 +622,39 @@ private var isHomeScreenActive = false
         if (expected <= 0L) return false
 
         var validIntervals = 0
-        var invalidIntervals = 0
 
         for (i in 1 until candles.size) {
-            val delta =
-                candles[i].timestamp - candles[i - 1].timestamp
+            val delta = candles[i].timestamp - candles[i - 1].timestamp
 
-            if (delta == expected.toLong()) {
+            /*
+             * The series is sorted before this method is called.
+             * Zero/negative deltas indicate duplicate or corrupt
+             * timestamps and must never be accepted.
+             */
+            if (delta <= 0L) {
+                return false
+            }
+
+            /*
+             * Smaller-than-requested spacing means the cache contains
+             * finer-grained data than requested. That is unsafe because
+             * it changes the strategy/backtest/chart semantics.
+             */
+            if (delta < expected) {
+                return false
+            }
+
+            if (delta == expected) {
                 validIntervals++
-            } else {
-                /*
-                 * Trading sessions naturally contain overnight and
-                 * weekend gaps. Those are valid. What is not valid
-                 * is a spacing smaller than the requested interval
-                 * or a whole dataset collapsing to daily candles.
-                 */
-                if (delta < expected) {
-                    invalidIntervals++
-                }
             }
         }
 
         /*
-         * Reject any cache containing a candle spacing smaller than
-         * the requested timeframe. Also reject a dataset where no
-         * normal interval exists at all.
+         * For a multi-candle intraday cache, require at least one
+         * normal interval. This rejects datasets that accidentally
+         * contain only daily/very sparse candles.
          */
-        return invalidIntervals == 0 && validIntervals > 0
+        return validIntervals > 0
     }
 
     /**
