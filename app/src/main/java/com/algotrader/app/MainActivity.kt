@@ -40,12 +40,17 @@ import com.algotrader.backtest.BacktestResult
 import com.algotrader.backtest.StrategyBacktestRunner
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.strategy.CprEmaTrendStrategy
+import com.algotrader.strategy.Signal
+import com.algotrader.strategy.SignalType
 import com.algotrader.strategy.DonchianEmaTrendStrategy
 import com.algotrader.strategyengine.StrategyFactory
+import com.algotrader.strategyengine.StrategyRunner
+import com.algotrader.strategyengine.StrategyRegistry
 import com.algotrader.strategyengine.StrategyConfiguration
 import com.algotrader.app.ui.screens.MarketDataScreen
 import com.algotrader.app.ui.screens.ExecutionScreen
 import com.algotrader.app.ui.screens.BacktestScreen
+import com.algotrader.app.ui.screens.StrategiesScreen
 import com.algotrader.app.ui.nav.AltrixaBottomNav
 import com.algotrader.app.ui.nav.AltrixaDestination
 import com.algotrader.app.theme.AltrixaColors
@@ -114,7 +119,15 @@ class MainActivity : Activity() {
     // ---- Home / trading workspace state ----
     private var selectedInstrument: InstrumentInfo = Instruments.NIFTY
     private var selectedTimeframe = "5m"
-    private var isHomeScreenActive = false
+
+    private var selectedSignalStrategyId =
+        StrategyRegistry.MOVING_AVERAGE_CROSSOVER
+
+    private val strategyRunner = StrategyRunner()
+
+    private val strategySelectorButtons =
+        mutableMapOf<String, Button>()
+private var isHomeScreenActive = false
 
     // Historical candles cached by backend symbol + timeframe.
     // Example key: "NSE:NIFTY50-INDEX|1h"
@@ -1002,6 +1015,7 @@ class MainActivity : Activity() {
         rsiChartView = null
         timeframeButtons.clear()
         instrumentButtons.clear()
+        strategySelectorButtons.clear()
         headerConnectionRow = null
         headerConnectionBadge = null
         ohlcOpenValue = null
@@ -1266,6 +1280,107 @@ class MainActivity : Activity() {
         return card
     }
 
+
+    /**
+     * Phase 3.2: one active strategy whose real engine signals are
+     * visualized on the main price chart.
+     */
+    private fun buildStrategySignalSelector(parent: LinearLayout) {
+        parent.addView(
+            TextView(this).apply {
+                text = "SIGNAL STRATEGY"
+                textSize = AltrixaDimens.textCaption
+                setTextColor(AltrixaColors.textFaint)
+                setTypeface(typeface, Typeface.BOLD)
+                setPadding(0, dp(4), 0, dp(6))
+            }
+        )
+
+        val scroll = ScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isVerticalScrollBarEnabled = false
+        }
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        val choices = listOf(
+            StrategyRegistry.MOVING_AVERAGE_CROSSOVER to "MA Crossover",
+            StrategyRegistry.RSI to "RSI",
+            StrategyRegistry.MACD to "MACD",
+            StrategyRegistry.BOLLINGER_BANDS to "Bollinger",
+            StrategyRegistry.DONCHIAN_CHANNEL to "Donchian",
+            StrategyRegistry.DONCHIAN_EMA to "Donchian + EMA",
+            StrategyRegistry.CPR_EMA to "CPR + EMA"
+        )
+
+        strategySelectorButtons.clear()
+
+        choices.forEach { (strategyId, label) ->
+            val button = altrixaChip(
+                this,
+                label,
+                strategyId == selectedSignalStrategyId
+            ) {
+                selectedSignalStrategyId = strategyId
+
+                strategySelectorButtons.forEach { (id, chip) ->
+                    val selected = id == selectedSignalStrategyId
+                    chip.setTextColor(
+                        if (selected)
+                            AltrixaColors.textPrimary
+                        else
+                            AltrixaColors.textSecondary
+                    )
+                    chip.background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(
+                            if (selected)
+                                AltrixaColors.accent
+                            else
+                                AltrixaColors.surfaceVariant
+                        )
+                        cornerRadius = AltrixaDimens.radiusSm
+                    }
+                }
+
+                val key =
+                    "${selectedInstrument.backendSymbol}|$selectedTimeframe"
+
+                val candles =
+                    candlesByInstrument[key]
+
+                if (candles.isNullOrEmpty()) {
+                    mainChartView?.setSignals(emptyList())
+                } else {
+                    updateStrategySignals(candles)
+                }
+            }
+
+            strategySelectorButtons[strategyId] = button
+
+            row.addView(
+                button,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    dp(38)
+                ).apply {
+                    marginEnd = dp(6)
+                }
+            )
+        }
+
+        scroll.addView(row)
+
+        parent.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(42)
+            )
+        )
+    }
+
     private fun buildMainChart(parent: LinearLayout): TradingChartView {
         val chart = TradingChartView(this)
         mainChartView = chart
@@ -1315,6 +1430,7 @@ class MainActivity : Activity() {
     /** Candlestick + EMA20/EMA50, volume, RSI(14) and the time-range caption, in one panel. */
     private fun buildChartPanel(): LinearLayout {
         val card = altrixaCard(this)
+        buildStrategySignalSelector(card)
         buildMainChart(card)
         buildVolumePanel(card)
         buildRsiPanel(card)
@@ -1446,6 +1562,7 @@ class MainActivity : Activity() {
             candleIntervalSeconds = timeframeToSeconds(selectedTimeframe),
             preserveViewport = preserveChartViewport
         )
+        updateStrategySignals(orderedCandles)
         volumeChartView?.setData(orderedCandles)
         rsiChartView?.setData(rsi)
 
@@ -1511,6 +1628,70 @@ class MainActivity : Activity() {
         }
     }
 
+
+    /**
+     * Evaluates the currently selected real strategy against the same
+     * historical candles shown on the chart.
+     *
+     * HOLD signals are deliberately omitted from the chart.
+     * No orders or portfolio mutations occur here.
+     */
+    private fun updateStrategySignals(uiCandles: List<Candle>) {
+        if (uiCandles.isEmpty()) {
+            mainChartView?.setSignals(emptyList())
+            return
+        }
+
+        val domainInstrument =
+            com.algotrader.domain.Instrument(
+                symbol = selectedInstrument.backendSymbol,
+                exchange = selectedInstrument.backendSymbol.substringBefore(":")
+            )
+
+        val domainTimeframe =
+            when (selectedTimeframe) {
+                "1m" -> com.algotrader.domain.Timeframe.MINUTE_1
+                "5m" -> com.algotrader.domain.Timeframe.MINUTE_5
+                "15m" -> com.algotrader.domain.Timeframe.MINUTE_15
+                "30m" -> com.algotrader.domain.Timeframe.MINUTE_30
+                "1h" -> com.algotrader.domain.Timeframe.HOUR_1
+                "4h" -> com.algotrader.domain.Timeframe.HOUR_4
+                "1D" -> com.algotrader.domain.Timeframe.DAY_1
+                else -> com.algotrader.domain.Timeframe.MINUTE_5
+            }
+
+        val domainCandles = uiCandles.map {
+            com.algotrader.domain.Candle(
+                instrument = domainInstrument,
+                timeframe = domainTimeframe,
+                timestamp = java.time.Instant.ofEpochSecond(it.timestamp),
+                open = it.open.toDouble(),
+                high = it.high.toDouble(),
+                low = it.low.toDouble(),
+                close = it.close.toDouble(),
+                volume = it.volume.toDouble()
+            )
+        }
+
+        try {
+            val signals =
+                strategyRunner.evaluate(
+                    configuration = StrategyConfiguration(
+                        strategyId = selectedSignalStrategyId
+                    ),
+                    candles = domainCandles,
+                    portfolio = com.algotrader.domain.Portfolio(
+                        cash = 0.0
+                    )
+                ).filter { it.type != SignalType.HOLD }
+
+            mainChartView?.setSignals(signals)
+        } catch (_: Exception) {
+            // Signal visualization must never break the market-data/chart path.
+            mainChartView?.setSignals(emptyList())
+        }
+    }
+
     /** Updates only the price/change header text — from live LTP if available, else last close. */
     private fun updateHeaderPrice() {
         if (!isHomeScreenActive) return
@@ -1554,16 +1735,7 @@ class MainActivity : Activity() {
     private fun showStrategies() {
         bottomNav.setSelected(AltrixaDestination.STRATEGIES)
         clearContent()
-
-        content.addView(title("Strategies"))
-
-        content.addView(section("Moving Average Crossover"))
-        content.addView(label("Fast MA: 20"))
-        content.addView(label("Slow MA: 50"))
-        content.addView(label("Status: READY"))
-
-        content.addView(section("Strategy Engine"))
-        content.addView(label("Engine status: READY"))
+        StrategiesScreen.render(this, content)
     }
 
     private fun showExecution() {
@@ -1572,7 +1744,7 @@ class MainActivity : Activity() {
         ExecutionScreen.render(this, content)
     }
 
-    
+
 private var selectedBacktestConfigurations: List<StrategyConfiguration> = emptyList()
 private var selectedBacktestCapital: Double = 100_000.0
 private var selectedBacktestSizing: PositionSizing = PositionSizing.FixedQuantity(1.0)
@@ -1823,6 +1995,10 @@ class TradingChartView(context: android.content.Context) : View(context) {
     private var isDaily = false
     private var latestPrice: Float? = null
     private var candleIntervalSeconds = 300L
+
+    // Phase 3.2: signals for the currently selected strategy.
+    // Kept independent from chart navigation/live-candle state.
+    private var strategySignals: List<com.algotrader.strategy.Signal> = emptyList()
 
     // Live countdown for the currently forming candle.
     // The timer is rendered beside the live LTP marker and refreshed
@@ -2082,7 +2258,7 @@ class TradingChartView(context: android.content.Context) : View(context) {
                     // Pinch controls horizontal/time zoom only.
                     // Price-axis zoom remains independent so the chart
                     // does not vertically expand or compress unexpectedly.
-                    
+
                     // Pinching is an explicit viewport interaction.
                     // Do not let incoming live ticks move the viewport
                     // while the user is zooming.
@@ -2203,6 +2379,11 @@ class TradingChartView(context: android.content.Context) : View(context) {
         }
 
         return (timestampSeconds / interval) * interval
+    }
+
+    fun setSignals(signals: List<com.algotrader.strategy.Signal>) {
+        strategySignals = signals
+        invalidate()
     }
 
     fun setLatestPrice(price: Float) {
@@ -3304,7 +3485,131 @@ class TradingChartView(context: android.content.Context) : View(context) {
                 infoTextPaint
             )
         }
+        drawStrategySignals(canvas)
+
     }
+
+
+    /**
+     * Draws BUY/SELL markers for the selected strategy.
+     *
+     * Signals are matched to candle timestamps and only BUY/SELL signals
+     * are rendered. HOLD signals are intentionally ignored.
+     */
+    private fun drawStrategySignals(canvas: Canvas) {
+        if (strategySignals.isEmpty() || candles.isEmpty()) return
+
+        val visibleStart = (endIndex - visibleCount + 1).coerceAtLeast(0)
+        val visibleEnd = endIndex.coerceAtMost(candles.lastIndex)
+        if (visibleStart > visibleEnd) return
+
+        val left = 8f
+        val right = width - 96f
+        val chartWidth = (right - left).coerceAtLeast(1f)
+
+        val candleWidth = chartWidth / visibleCount.coerceAtLeast(1)
+
+        val visibleCandles = candles.subList(
+            visibleStart,
+            visibleEnd + 1
+        )
+
+        if (visibleCandles.isEmpty()) return
+
+        var minPrice = visibleCandles.minOf { it.low }
+        var maxPrice = visibleCandles.maxOf { it.high }
+
+        ema20.drop(visibleStart).take(visibleCandles.size).forEach {
+            minPrice = minOf(minPrice, it)
+            maxPrice = maxOf(maxPrice, it)
+        }
+
+        ema50.drop(visibleStart).take(visibleCandles.size).forEach {
+            minPrice = minOf(minPrice, it)
+            maxPrice = maxOf(maxPrice, it)
+        }
+
+        latestPrice?.let {
+            minPrice = minOf(minPrice, it)
+            maxPrice = maxOf(maxPrice, it)
+        }
+
+        val range = (maxPrice - minPrice).coerceAtLeast(0.000001f)
+
+        // Keep marker placement aligned with the existing chart's
+        // visible price region.
+        val top = 16f
+        val bottom = height - 18f
+        val chartHeight = (bottom - top).coerceAtLeast(1f)
+
+        fun priceToY(price: Float): Float {
+            return bottom - ((price - minPrice) / range) * chartHeight
+        }
+
+        strategySignals.forEach { signal ->
+            if (signal.type != com.algotrader.strategy.SignalType.BUY &&
+                signal.type != com.algotrader.strategy.SignalType.SELL
+            ) {
+                return@forEach
+            }
+
+            val signalSecond = signal.timestamp.epochSecond
+
+            val candleIndex = candles.indexOfFirst {
+                it.timestamp == signalSecond
+            }
+
+            if (candleIndex !in visibleStart..visibleEnd) return@forEach
+
+            val visibleIndex = candleIndex - visibleStart
+            val x = left + (visibleIndex + 0.5f) * candleWidth
+
+            val candle = candles[candleIndex]
+
+            val isBuy = signal.type == com.algotrader.strategy.SignalType.BUY
+            val price = if (isBuy) candle.low else candle.high
+            val baseY = priceToY(price)
+
+            val markerSize = 10f
+
+            paint.style = Paint.Style.FILL
+            paint.color = if (isBuy) BULLISH_COLOR else BEARISH_COLOR
+
+            val path = Path()
+
+            if (isBuy) {
+                path.moveTo(x, baseY + markerSize)
+                path.lineTo(x - markerSize, baseY - markerSize)
+                path.lineTo(x + markerSize, baseY - markerSize)
+            } else {
+                path.moveTo(x, baseY - markerSize)
+                path.lineTo(x - markerSize, baseY + markerSize)
+                path.lineTo(x + markerSize, baseY + markerSize)
+            }
+
+            path.close()
+            canvas.drawPath(path, paint)
+
+            textPaint.typeface = Typeface.DEFAULT_BOLD
+            textPaint.textSize = 20f
+            textPaint.color = if (isBuy) BULLISH_COLOR else BEARISH_COLOR
+
+            val label = if (isBuy) "BUY" else "SELL"
+            val labelY = if (isBuy) {
+                baseY + markerSize + 22f
+            } else {
+                baseY - markerSize - 8f
+            }
+
+            canvas.drawText(
+                label,
+                x - textPaint.measureText(label) / 2f,
+                labelY,
+                textPaint
+            )
+        }
+    }
+
 
     private fun price(value: Float): String =
         String.format(

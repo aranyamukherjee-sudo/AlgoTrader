@@ -9,6 +9,7 @@ import com.algotrader.app.ui.components.altrixaLabel
 import com.algotrader.app.ui.components.altrixaSectionHeader
 import com.algotrader.app.ui.components.altrixaStatusBadge
 import com.algotrader.app.ui.components.altrixaTitle
+import com.algotrader.strategyengine.StrategyRegistry
 
 /**
  * Strategies screen (Part 1 — Foundation).
@@ -16,21 +17,12 @@ import com.algotrader.app.ui.components.altrixaTitle
  * The previous version showed hardcoded, made-up numbers ("Fast MA: 20",
  * "Slow MA: 50", "Status: READY") for one strategy, unrelated to what
  * `core:strategy` actually contains and with no live status behind "READY".
- * This lists the real strategy classes that ship in `core:strategy` by name
- * only, each marked "Idle" — no fabricated parameters or performance, since
- * nothing here is currently executing outside the Backtest screen.
+ * This lists the real strategy classes from `core:strategy` using their
+ * metadata, default parameters, and current application readiness state.
  */
 object StrategiesScreen {
 
-    private val strategyNames = listOf(
-        "Moving Average Crossover",
-        "RSI",
-        "MACD",
-        "Bollinger Bands",
-        "Donchian Channel",
-        "Donchian + EMA Trend",
-        "CPR + EMA Trend"
-    )
+    private val strategies = StrategyRegistry.all()
 
     fun render(context: Context, container: LinearLayout) {
         val topGap = LinearLayout.LayoutParams(
@@ -44,15 +36,64 @@ object StrategiesScreen {
         )
 
         container.addView(altrixaSectionHeader(context, "Available"))
-        strategyNames.forEach { name ->
+
+        strategies.forEach { strategy ->
             val card = altrixaCard(context)
-            val row = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+
             row.addView(
-                altrixaLabel(context, name),
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                altrixaLabel(context, strategy.name),
+                LinearLayout.LayoutParams(
+                    0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
             )
-            row.addView(altrixaStatusBadge(context, "IDLE", AltrixaTone.NEUTRAL))
+
+            row.addView(
+                altrixaStatusBadge(context, "READY", AltrixaTone.ACCENT)
+            )
+
             card.addView(row)
+
+            card.addView(
+                altrixaLabel(context, strategy.metadata.description),
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = context.dpToPx(4)
+                }
+            )
+
+            if (strategy.metadata.parameters.isNotEmpty()) {
+                card.addView(
+                    altrixaLabel(context, "Parameters"),
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        topMargin = context.dpToPx(8)
+                    }
+                )
+
+                strategy.metadata.parameters.forEach { parameter ->
+                    card.addView(
+                        altrixaLabel(
+                            context,
+                            "${parameter.name}: ${parameter.value}"
+                        ),
+                        LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT
+                        )
+                    )
+                }
+            }
+
             container.addView(card, topGap)
         }
 
