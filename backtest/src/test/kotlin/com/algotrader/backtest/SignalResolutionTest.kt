@@ -48,6 +48,29 @@ class SignalResolutionTest {
     }
 
     @Test
+    fun `sell while long flattens in long-only mode`() {
+        assertNull(
+            resolveTargetDirection(
+                SignalType.SELL,
+                TradeDirection.LONG,
+                PositionDirection.LONG_ONLY
+            )
+        )
+    }
+
+    @Test
+    fun `buy while short flattens in short-only mode`() {
+        assertNull(
+            resolveTargetDirection(
+                SignalType.BUY,
+                TradeDirection.SHORT,
+                PositionDirection.SHORT_ONLY
+            )
+        )
+    }
+
+
+    @Test
     fun `sell while flat opens short only if the strategy allows going short`() {
         assertEquals(
             TradeDirection.SHORT,

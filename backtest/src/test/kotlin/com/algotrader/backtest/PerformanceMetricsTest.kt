@@ -70,6 +70,32 @@ class PerformanceMetricsTest {
     }
 
     @Test
+    fun `break-even trade is not counted as a winning trade`() {
+        val trades = listOf(trade(100.0, 100.0))
+        val equityCurve = listOf(
+            equityPoint(0, 1000.0),
+            equityPoint(1, 1000.0)
+        )
+
+        val metrics = computePerformanceMetrics(
+            initialCapital = 1000.0,
+            finalEquity = 1000.0,
+            trades = trades,
+            equityCurve = equityCurve
+        )
+
+        // Current convention: only strictly positive PnL is a win.
+        // Break-even therefore remains in the non-winning bucket.
+        assertEquals(1, metrics.totalTrades)
+        assertEquals(0, metrics.winningTrades)
+        assertEquals(1, metrics.losingTrades)
+        assertEquals(0.0, metrics.winRate)
+        assertEquals(0.0, metrics.netProfit, 1e-9)
+        assertEquals(0.0, metrics.averageTradePnl, 1e-9)
+    }
+
+
+    @Test
     fun `profit factor is null when there are no losing trades`() {
         val trades = listOf(trade(100.0, 120.0))
         val equityCurve = listOf(equityPoint(0, 1000.0), equityPoint(1, 1020.0))

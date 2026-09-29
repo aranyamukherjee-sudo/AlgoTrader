@@ -205,6 +205,83 @@ class BacktestEngineTest {
         assertEquals(200.0, trade.entryPrice)
     }
 
+    // 10. Signals on the final bar cannot execute because there is no
+    // following bar open.
+    @Test
+    fun `signal on final bar is not executed`() {
+        val candles = testCandles(
+            listOf(
+                100.0 to 100.0,
+                105.0 to 105.0,
+                110.0 to 110.0
+            )
+        )
+        val strategy = ScriptedStrategy(
+            mapOf(2 to SignalType.BUY),
+            metadata = longOnly()
+        )
+        val engine = BacktestEngine(BacktestConfig(initialCapital = 10_000.0))
+
+        val result = engine.run(strategy, candles)
+
+        assertEquals(0, result.trades.size)
+        assertEquals(10_000.0, result.finalEquity, 1e-9)
+    }
+
+    // 11. Input candles are sorted before strategy evaluation/execution.
+    @Test
+    fun `unsorted candles are processed chronologically`() {
+        val chronological = listOf(
+            100.0 to 100.0,
+            105.0 to 105.0,
+            110.0 to 110.0,
+            115.0 to 115.0
+        )
+
+        val sortedCandles = testCandles(chronological)
+        val unsortedCandles = sortedCandles.reversed()
+
+        val strategy = ScriptedStrategy(
+            mapOf(0 to SignalType.BUY, 2 to SignalType.SELL),
+            metadata = longOnly()
+        )
+        val engine = BacktestEngine(BacktestConfig(initialCapital = 10_000.0))
+
+        val sortedResult = engine.run(strategy, sortedCandles)
+        val unsortedResult = engine.run(strategy, unsortedCandles)
+
+        assertEquals(sortedResult.trades.size, unsortedResult.trades.size)
+        assertEquals(
+            sortedResult.finalEquity,
+            unsortedResult.finalEquity,
+            1e-9
+        )
+        assertEquals(
+            sortedResult.trades.first().entryPrice,
+            unsortedResult.trades.first().entryPrice,
+            1e-9
+        )
+        assertEquals(
+            sortedResult.trades.first().exitPrice,
+            unsortedResult.trades.first().exitPrice,
+            1e-9
+        )
+    }
+
+    // 12. An empty candle set is a valid direct-engine no-op.
+    @Test
+    fun `empty candle input returns unchanged initial capital`() {
+        val strategy = ScriptedStrategy(emptyMap(), metadata = longOnly())
+        val engine = BacktestEngine(BacktestConfig(initialCapital = 10_000.0))
+
+        val result = engine.run(strategy, emptyList())
+
+        assertEquals(0, result.trades.size)
+        assertEquals(0, result.equityCurve.size)
+        assertEquals(10_000.0, result.finalEquity, 1e-9)
+    }
+
+
     // Position sizing is honored on entry.
     @Test
     fun `percent-of-equity sizing computes quantity from flat equity at execution time`() {
