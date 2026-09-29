@@ -207,7 +207,7 @@ object BacktestScreen {
         timeframe: String,
         candleCount: Int,
         initialCapital: Double,
-        positionQuantity: Double,
+        positionSizing: PositionSizing,
         results: List<BacktestResult>,
         onRunAgain: () -> Unit
     ) {
@@ -218,8 +218,14 @@ object BacktestScreen {
         testCard.addView(fieldRow(context, "Instrument", "$instrumentName \u00b7 $timeframe"), matchWidth(context))
         testCard.addView(fieldRow(context, "Candles", "$candleCount"), matchWidth(context))
         testCard.addView(fieldRow(context, "Initial Capital", formatMoney(initialCapital)), matchWidth(context))
+        val sizingLabel = when (positionSizing) {
+            is PositionSizing.FixedQuantity ->
+                "Fixed Quantity · ${formatQuantity(positionSizing.quantity)}"
+            is PositionSizing.PercentOfEquity ->
+                "% of Equity · ${formatPercent(positionSizing.percent)}"
+        }
         testCard.addView(
-            fieldRow(context, "Position Sizing", "Configured"),
+            fieldRow(context, "Position Sizing", sizingLabel),
             matchWidth(context)
         )
         container.addView(testCard, topGap(context))

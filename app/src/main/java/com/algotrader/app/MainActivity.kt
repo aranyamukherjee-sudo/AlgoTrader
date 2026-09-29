@@ -1705,8 +1705,8 @@ private fun renderBacktestResults(
         instrumentName = selectedInstrument.displayName,
         timeframe = selectedTimeframe,
         candleCount = candleCount,
-        initialCapital = 100_000.0,
-        positionQuantity = 1.0,
+        initialCapital = selectedBacktestCapital,
+        positionSizing = selectedBacktestSizing,
         results = results
     ) {
         runBacktest()
