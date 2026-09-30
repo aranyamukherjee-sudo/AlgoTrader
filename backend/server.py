@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import hashlib
 import time
 import requests
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,13 @@ AUTH_ERROR_CODES = {-8, -15, -16, -17, -99}
 AUTH_REQUIRED_STATE = "auth_required"
 AUTHENTICATED_STATE = "authenticated"
 
+FYERS_REFRESH_URL = (
+    "https://api-t1.fyers.in/api/v3/validate-refresh-token"
+)
+
+refresh_lock = threading.Lock()
+refresh_in_progress = False
+
 
 def classify_fyers_error(error):
     code = None
@@ -75,6 +83,118 @@ def classify_fyers_error(error):
             pass
 
     return code
+
+
+def refresh_access_token():
+    """
+    Obtain a fresh FYERS access token using the Render-stored
+    refresh token, App Secret, and PIN.
+
+    Secrets and tokens are never printed or written to source files.
+    """
+    global last_fyers_error
+
+    app_id = os.getenv("FYERS_APP_ID")
+    app_secret = os.getenv("FYERS_APP_SECRET")
+    refresh_token = os.getenv("FYERS_REFRESH_TOKEN")
+    pin = os.getenv("FYERS_PIN")
+
+    missing = [
+        name
+        for name, value in (
+            ("FYERS_APP_ID", app_id),
+            ("FYERS_APP_SECRET", app_secret),
+            ("FYERS_REFRESH_TOKEN", refresh_token),
+            ("FYERS_PIN", pin),
+        )
+        if not value
+    ]
+
+    if missing:
+        last_fyers_error = (
+            "FYERS refresh configuration incomplete: "
+            + ", ".join(missing)
+            + " missing"
+        )
+        print(last_fyers_error, flush=True)
+        return None
+
+    # FYERS v3 requires SHA-256 of:
+    # APP_ID:APP_SECRET
+    app_id_hash = hashlib.sha256(
+        f"{app_id}:{app_secret}".encode("utf-8")
+    ).hexdigest()
+
+    payload = {
+        "grant_type": "refresh_token",
+        "appIdHash": app_id_hash,
+        "refresh_token": refresh_token,
+        "pin": pin,
+    }
+
+    try:
+        response = requests.post(
+            FYERS_REFRESH_URL,
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+
+        data = response.json()
+
+    except Exception as error:
+        last_fyers_error = (
+            "FYERS token refresh request failed: "
+            f"{type(error).__name__}"
+        )
+        print(last_fyers_error, flush=True)
+        return None
+
+    if data.get("s") == "ok" and data.get("access_token"):
+        access_token = data["access_token"]
+
+        # Keep the new token only in the running Render process.
+        # Do not print it and do not write it to source control.
+        os.environ["FYERS_ACCESS_TOKEN"] = access_token
+
+        print(
+            "FYERS access token refreshed successfully.",
+            flush=True,
+        )
+
+        return access_token
+
+    code = classify_fyers_error(data)
+    message = data.get("message", "unknown refresh error")
+
+    last_fyers_error = (
+        f"FYERS token refresh failed "
+        f"(code {code}): {message}"
+    )
+
+    print(last_fyers_error, flush=True)
+    return None
+
+
+def try_refresh_and_reconnect():
+    global refresh_in_progress, fyers_status
+
+    with refresh_lock:
+        if refresh_in_progress:
+            return
+        refresh_in_progress = True
+
+    try:
+        access_token = refresh_access_token()
+
+        if access_token:
+            connect_fyers(access_token)
+        else:
+            fyers_status = AUTH_REQUIRED_STATE
+
+    finally:
+        with refresh_lock:
+            refresh_in_progress = False
 
 
 def on_error(error):
@@ -94,10 +214,15 @@ def on_error(error):
             latest_quotes.clear()
 
         print(
-            "FYERS authentication required. "
-            "Generate a fresh access token through FYERS OAuth.",
+            "FYERS authentication failure detected. "
+            "Attempting automatic token refresh.",
             flush=True,
         )
+
+        threading.Thread(
+            target=try_refresh_and_reconnect,
+            daemon=True,
+        ).start()
     else:
         fyers_status = "error"
 
@@ -159,6 +284,11 @@ def mark_rest_auth_failure(response):
             f"FYERS REST authentication failed: code={code}",
             flush=True,
         )
+
+        threading.Thread(
+            target=try_refresh_and_reconnect,
+            daemon=True,
+        ).start()
 
         return True
 
@@ -222,30 +352,50 @@ def connect_fyers(access_token):
 def auth_manager():
     global fyers_status, last_fyers_error
 
-    # Deliberately use the normal FYERS OAuth access-token flow.
-    #
-    # We do NOT run an automatic refresh loop here. FYERS'
-    # current authentication framework requires deliberate
-    # authentication rather than assuming a perpetual session.
-    access_token = os.getenv("FYERS_ACCESS_TOKEN")
-
     if not os.getenv("FYERS_APP_ID"):
         fyers_status = "not_configured"
         last_fyers_error = "FYERS_APP_ID is not configured"
         print(last_fyers_error, flush=True)
         return
 
-    if not access_token:
-        fyers_status = "auth_expired"
-        last_fyers_error = "FYERS_ACCESS_TOKEN is not configured"
+    # Prefer the Render-stored refresh token on startup.
+    # This means a Render restart does not depend on the old
+    # access token remaining valid.
+    if (
+        os.getenv("FYERS_REFRESH_TOKEN")
+        and os.getenv("FYERS_APP_SECRET")
+        and os.getenv("FYERS_PIN")
+    ):
         print(
-            "FYERS access token is missing. "
-            "Generate a fresh access token through FYERS OAuth.",
+            "Attempting FYERS access-token refresh from "
+            "configured refresh token.",
             flush=True,
         )
+
+        refreshed_token = refresh_access_token()
+
+        if refreshed_token:
+            connect_fyers(refreshed_token)
+            return
+
+        print(
+            "FYERS refresh failed; falling back to "
+            "configured access token.",
+            flush=True,
+        )
+
+    access_token = os.getenv("FYERS_ACCESS_TOKEN")
+
+    if not access_token:
+        fyers_status = "auth_expired"
+        last_fyers_error = (
+            "FYERS_ACCESS_TOKEN is not configured"
+        )
+        print(last_fyers_error, flush=True)
         return
 
     connect_fyers(access_token)
+
 
 @app.on_event("startup")
 def startup():
