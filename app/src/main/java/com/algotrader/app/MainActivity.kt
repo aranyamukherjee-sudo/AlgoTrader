@@ -121,6 +121,7 @@ class MainActivity : Activity() {
 
     private lateinit var backtestJobStore: BacktestJobStore
     private var activeBacktestJobId: String? = null
+    private var renderedBacktestJobId: String? = null
 
     private val backtestProgressHandler = Handler(Looper.getMainLooper())
     private var isBacktestScreenVisible = false
@@ -2185,6 +2186,7 @@ private fun runBacktest() {
 
         backtestJobStore.saveCandles(job.id, domainCandles)
         activeBacktestJobId = job.id
+        renderedBacktestJobId = null
         isBacktestScreenVisible = true
         backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
 
@@ -2266,7 +2268,14 @@ private fun showBacktest() {
 
         if (job != null) {
             restoreBacktestJob(job)
-            backtestProgressHandler.post(backtestProgressRunnable)
+
+            if (job.status != BacktestJobStore.Status.COMPLETED &&
+                job.status != BacktestJobStore.Status.FAILED &&
+                job.status != BacktestJobStore.Status.CANCELLED
+            ) {
+                backtestProgressHandler.post(backtestProgressRunnable)
+            }
+
             return
         }
 
@@ -2318,9 +2327,14 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
 
     when (job.status) {
         BacktestJobStore.Status.COMPLETED -> {
+            if (renderedBacktestJobId == job.id) {
+                return
+            }
+
             val results = backtestJobStore.getResults(job.id)
 
             if (results.isNotEmpty()) {
+                renderedBacktestJobId = job.id
                 BacktestScreen.renderResults(
                     this,
                     content,
@@ -2332,6 +2346,7 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
                     results = results
                 ) {
                     activeBacktestJobId = null
+                    renderedBacktestJobId = null
                     renderBacktestConfiguration()
                 }
             } else {
@@ -2342,18 +2357,30 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
         }
 
         BacktestJobStore.Status.FAILED -> {
+            if (renderedBacktestJobId == job.id) {
+                return
+            }
+
+            renderedBacktestJobId = job.id
             renderBacktestFailure(
                 job.errorMessage ?: "Backtest failed."
             )
         }
 
         BacktestJobStore.Status.CANCELLED -> {
+            if (renderedBacktestJobId == job.id) {
+                return
+            }
+
+            renderedBacktestJobId = job.id
             renderBacktestFailure(
                 "Backtest was cancelled."
             )
         }
 
         else -> {
+            renderedBacktestJobId = null
+
             BacktestScreen.renderRunning(
                 this,
                 content,
@@ -2395,6 +2422,7 @@ private fun refreshBacktestJob(jobId: String) {
         BacktestJobStore.Status.FAILED,
         BacktestJobStore.Status.CANCELLED -> {
             backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+            isBacktestScreenVisible = true
             restoreBacktestJob(job)
         }
 
@@ -2418,6 +2446,7 @@ private fun renderBacktestFailure(message: String) {
         message
     ) {
         activeBacktestJobId = null
+        renderedBacktestJobId = null
         renderBacktestConfiguration()
     }
 }
