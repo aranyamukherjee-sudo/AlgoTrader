@@ -44,6 +44,10 @@ history_cache_lock = threading.Lock()
 # Refresh cached historical data after 5 minutes.
 HISTORY_CACHE_TTL = 5 * 60
 
+# Serializes live FYERS token replacement so two Android requests
+# cannot replace the active connection at the same time.
+token_update_lock = threading.Lock()
+
 
 def on_message(message):
     symbol = message.get("symbol")
@@ -164,7 +168,7 @@ def mark_rest_auth_failure(response):
     return False
 
 
-def connect_fyers(access_token):
+def connect_fyers(access_token, close_existing=False):
     global socket, history_client, fyers_status, last_fyers_error
 
     app_id = os.getenv("FYERS_APP_ID")
@@ -173,16 +177,24 @@ def connect_fyers(access_token):
         fyers_status = "not_configured"
         last_fyers_error = "FYERS_APP_ID is not configured"
         print(last_fyers_error, flush=True)
-        return
+        return False
 
     if not access_token:
-        fyers_status = "auth_expired"
+        fyers_status = AUTH_REQUIRED_STATE
         last_fyers_error = "FYERS_ACCESS_TOKEN is not configured"
         print(last_fyers_error, flush=True)
-        return
+        return False
+
+    if close_existing and socket is not None:
+        try:
+            socket.close()
+        except Exception:
+            pass
+
+        socket = None
 
     # REST client uses the raw access token.
-    history_client = fyersModel.FyersModel(
+    new_history_client = fyersModel.FyersModel(
         client_id=app_id,
         token=access_token,
         log_path=""
@@ -192,7 +204,7 @@ def connect_fyers(access_token):
     # APP_ID:ACCESS_TOKEN
     websocket_token = f"{app_id}:{access_token}"
 
-    socket = data_ws.FyersDataSocket(
+    new_socket = data_ws.FyersDataSocket(
         access_token=websocket_token,
         log_path="",
         litemode=False,
@@ -204,6 +216,9 @@ def connect_fyers(access_token):
         on_message=on_message,
     )
 
+    history_client = new_history_client
+    socket = new_socket
+
     fyers_status = "connecting"
     last_fyers_error = None
 
@@ -213,9 +228,114 @@ def connect_fyers(access_token):
     )
 
     threading.Thread(
-        target=socket.connect,
+        target=new_socket.connect,
         daemon=True,
     ).start()
+
+    return True
+
+
+def validate_fyers_access_token(access_token):
+    """
+    Validate a candidate FYERS access token without disturbing the
+    currently active connection.
+
+    A lightweight quotes request is used because successful REST
+    authentication is authoritative for this service.
+    """
+    app_id = os.getenv("FYERS_APP_ID")
+
+    if not app_id:
+        return False, "FYERS_APP_ID is not configured"
+
+    if not access_token:
+        return False, "Access token is empty"
+
+    try:
+        candidate = fyersModel.FyersModel(
+            client_id=app_id,
+            token=access_token,
+            log_path=""
+        )
+
+        response = candidate.quotes(
+            data={
+                "symbols": ",".join(SYMBOLS),
+            }
+        )
+
+        if isinstance(response, dict) and response.get("s") == "ok":
+            return True, None
+
+        code = classify_fyers_error(response)
+
+        if code is not None:
+            return False, f"FYERS rejected access token (code {code})"
+
+        return False, "FYERS rejected access token"
+
+    except Exception as error:
+        return False, f"FYERS token validation failed: {error}"
+
+
+def replace_fyers_access_token(access_token):
+    """
+    Atomically validate and switch the running FYERS connection.
+
+    The current token/client/socket remain untouched when validation
+    fails. On success the running REST client and WebSocket are replaced.
+    """
+    global fyers_status, last_fyers_error
+
+    with token_update_lock:
+        valid, error_message = validate_fyers_access_token(access_token)
+
+        if not valid:
+            return False, error_message
+
+        app_id = os.getenv("FYERS_APP_ID")
+
+        try:
+            # Only after validation succeeds do we modify live state.
+            os.environ["FYERS_ACCESS_TOKEN"] = access_token
+
+            # Remove stale market prices immediately.
+            with lock:
+                latest_quotes.clear()
+
+            # In-memory historical responses were obtained under the
+            # previous authentication session. Force fresh data.
+            with history_cache_lock:
+                history_cache.clear()
+
+            connected = connect_fyers(
+                access_token,
+                close_existing=True,
+            )
+
+            if not connected:
+                return False, "FYERS connection could not be started"
+
+            fyers_status = "connecting"
+            last_fyers_error = None
+
+            print(
+                "FYERS access token replaced successfully.",
+                flush=True,
+            )
+
+            return True, None
+
+        except Exception as error:
+            fyers_status = AUTH_REQUIRED_STATE
+            last_fyers_error = str(error)
+
+            print(
+                f"FYERS token replacement failed: {error}",
+                flush=True,
+            )
+
+            return False, str(error)
 
 
 def auth_manager():
@@ -266,6 +386,56 @@ def health():
         "authenticated": fyers_status == AUTHENTICATED_STATE,
         "auth_required": fyers_status == AUTH_REQUIRED_STATE,
         "last_error": last_fyers_error,
+    }
+
+
+@app.post("/auth/update-token")
+def update_auth_token(payload: dict):
+    """
+    Replace the active FYERS OAuth access token.
+
+    Authentication for this endpoint is intentionally handled by a
+    server-side ALTRIXA_TOKEN_UPDATE_KEY. The key is never embedded
+    in the Android application.
+    """
+    update_key = os.getenv("ALTRIXA_TOKEN_UPDATE_KEY")
+
+    if not update_key:
+        return {
+            "status": "error",
+            "message": "Token update endpoint is not configured",
+        }
+
+    supplied_key = str(payload.get("update_key") or "")
+    new_token = str(payload.get("access_token") or "").strip()
+
+    if not supplied_key or supplied_key != update_key:
+        return {
+            "status": "error",
+            "message": "Unauthorized token update request",
+        }
+
+    if not new_token:
+        return {
+            "status": "error",
+            "message": "Access token is required",
+        }
+
+    success, error_message = replace_fyers_access_token(new_token)
+
+    if not success:
+        return {
+            "status": "error",
+            "message": error_message or "Token replacement failed",
+            "auth_required": fyers_status == AUTH_REQUIRED_STATE,
+        }
+
+    return {
+        "status": "ok",
+        "message": "FYERS access token accepted; reconnecting",
+        "fyers": fyers_status,
+        "authenticated": False,
+        "auth_required": False,
     }
 
 
