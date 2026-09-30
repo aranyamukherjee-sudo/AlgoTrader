@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Typeface
 import android.os.Bundle
+import android.Manifest
 import android.view.Gravity
 import android.view.View
 import android.view.MotionEvent
@@ -18,7 +19,17 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import android.app.Activity
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import org.json.JSONArray
@@ -39,6 +50,8 @@ import com.algotrader.backtest.BacktestConfig
 import com.algotrader.backtest.BacktestResult
 import com.algotrader.backtest.StrategyBacktestRunner
 import com.algotrader.backtest.PositionSizing
+import com.algotrader.app.backtest.BacktestJobStore
+import com.algotrader.app.backtest.BacktestWorker
 import com.algotrader.strategy.CprEmaTrendStrategy
 import com.algotrader.strategy.Signal
 import com.algotrader.strategy.SignalType
@@ -90,6 +103,9 @@ class MainActivity : Activity() {
     companion object {
         private const val BACKEND_HTTP_BASE = "https://algotrader-backend-kras.onrender.com"
         private const val BACKEND_WS_URL = "wss://algotrader-backend-kras.onrender.com/ws/quotes"
+        private const val FYERS_AUTH_NOTIFICATION_CHANNEL = "fyers_auth"
+        private const val FYERS_AUTH_NOTIFICATION_ID = 4201
+        private const val FYERS_AUTH_REQUIRED = "auth_required"
         private val TIMEFRAMES = listOf("5m", "15m", "30m", "1h", "1D")
 
         // Persistent historical-candle disk cache.
@@ -103,6 +119,30 @@ class MainActivity : Activity() {
     private lateinit var content: LinearLayout
     private lateinit var bottomNav: AltrixaBottomNav
 
+    private lateinit var backtestJobStore: BacktestJobStore
+    private var activeBacktestJobId: String? = null
+
+    private val backtestProgressHandler = Handler(Looper.getMainLooper())
+    private var isBacktestScreenVisible = false
+
+    private val backtestProgressRunnable = object : Runnable {
+        override fun run() {
+            if (!isBacktestScreenVisible) return
+
+            val jobId = activeBacktestJobId
+            if (jobId == null) {
+                backtestProgressHandler.postDelayed(this, 750L)
+                return
+            }
+
+            refreshBacktestJob(jobId)
+
+            if (isBacktestScreenVisible) {
+                backtestProgressHandler.postDelayed(this, 750L)
+            }
+        }
+    }
+
     private val liveHandler = Handler(Looper.getMainLooper())
     private val wsClient = OkHttpClient.Builder()
         .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
@@ -111,6 +151,13 @@ class MainActivity : Activity() {
         .callTimeout(90, java.util.concurrent.TimeUnit.SECONDS)
         .build()
     private var quotesWebSocket: WebSocket? = null
+
+    // FYERS authentication state. This is deliberately separate from the
+    // WebSocket connection state: a socket can be disconnected for network
+    // reasons, while auth_required is a specific backend authentication state.
+    private var fyersAuthRequired = false
+    private var fyersAuthNotificationShown = false
+    private var fyersAuthBanner: TextView? = null
 
     // Single background thread for all disk cache reads/writes: keeps file
     // access off the main thread and serializes writes to the same key.
@@ -368,6 +415,134 @@ private var isHomeScreenActive = false
      * screen untouched and only surfaces the existing non-blocking status
      * message.
      */
+    /**
+     * Marks the backend as requiring a fresh FYERS access token.
+     *
+     * This does not attempt token refresh. FYERS refresh-token API is not
+     * available for this application, so the eventual flow will be:
+     * auth_required -> user generates fresh token -> user submits token.
+     */
+    private fun handleFyersAuthRequired() {
+        runOnUiThread {
+            val wasAlreadyRequired = fyersAuthRequired
+            fyersAuthRequired = true
+
+            headerStatusLabel?.let {
+                it.text = "FYERS Authentication Required"
+                it.setTextColor(AltrixaColors.warning)
+            }
+
+            fyersAuthBanner?.let {
+                it.visibility = View.VISIBLE
+            }
+
+            if (!wasAlreadyRequired || !fyersAuthNotificationShown) {
+                showFyersAuthNotification()
+            }
+        }
+    }
+
+    private fun clearFyersAuthRequired() {
+        runOnUiThread {
+            fyersAuthRequired = false
+            fyersAuthNotificationShown = false
+
+            fyersAuthBanner?.let {
+                it.visibility = View.GONE
+            }
+
+            if (headerStatusLabel?.text?.toString() == "FYERS Authentication Required") {
+                headerStatusLabel?.text = ""
+            }
+        }
+    }
+
+    private fun showFyersAuthNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                4202
+            )
+            // The permission callback will retry the notification.
+            return
+        }
+
+        val notificationManager =
+            getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                FYERS_AUTH_NOTIFICATION_CHANNEL,
+                "FYERS Authentication",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Authentication alerts for ALTRIXA market data"
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+
+        val intent = android.content.Intent(this, MainActivity::class.java).apply {
+            flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            4203,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    PendingIntent.FLAG_IMMUTABLE
+                } else {
+                    0
+                }
+        )
+
+        val notification = android.app.Notification.Builder(
+            this,
+            FYERS_AUTH_NOTIFICATION_CHANNEL
+        )
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("ALTRIXA — FYERS token expired")
+            .setContentText("Open ALTRIXA to refresh FYERS authentication.")
+            .setStyle(
+                android.app.Notification.BigTextStyle().bigText(
+                    "Your FYERS access token requires renewal. Open ALTRIXA to generate and update a fresh token."
+                )
+            )
+            .setPriority(android.app.Notification.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        notificationManager.notify(FYERS_AUTH_NOTIFICATION_ID, notification)
+        fyersAuthNotificationShown = true
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == 4202 &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED &&
+            fyersAuthRequired
+        ) {
+            showFyersAuthNotification()
+        }
+    }
+
+    private fun backendRequiresFyersAuth(root: JSONObject): Boolean {
+        return root.optBoolean("auth_required", false) ||
+            root.optString("fyers", "") == FYERS_AUTH_REQUIRED
+    }
+
     private fun fetchHistoryFromBackend(
         instrument: InstrumentInfo,
         requestedSymbol: String,
@@ -418,6 +593,12 @@ private var isHomeScreenActive = false
 
                     try {
                         val root = JSONObject(body)
+
+                        if (backendRequiresFyersAuth(root)) {
+                            handleFyersAuthRequired()
+                            return
+                        }
+
                         val array = root.optJSONArray("candles")
 
                         if (array == null || array.length() == 0) {
@@ -986,6 +1167,16 @@ private var isHomeScreenActive = false
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     try {
                         val root = JSONObject(text)
+
+                        if (backendRequiresFyersAuth(root)) {
+                            handleFyersAuthRequired()
+                            return
+                        }
+
+                        if (fyersAuthRequired) {
+                            clearFyersAuthRequired()
+                        }
+
                         val quotes = root.optJSONObject("quotes") ?: return
 
                         for (instrument in Instruments.all) {
@@ -1036,14 +1227,46 @@ private var isHomeScreenActive = false
     // ---------------------------------------------------------------------
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        backtestJobStore = BacktestJobStore(applicationContext)
+
+        intent.getStringExtra(BacktestWorker.EXTRA_BACKTEST_JOB_ID)?.let {
+            activeBacktestJobId = it
+        }
+
         super.onCreate(savedInstanceState)
 
         buildApp()
         connectQuotesWebSocket()
+
+        if (activeBacktestJobId != null) {
+            showBacktest()
+        } else {
+            showHome()
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+
+        intent?.getStringExtra(BacktestWorker.EXTRA_BACKTEST_JOB_ID)?.let {
+            activeBacktestJobId = it
+            showBacktest()
+        }
+    }
+
+    override fun onBackPressed() {
+        if (isHomeScreenActive) {
+            super.onBackPressed()
+            return
+        }
+
         showHome()
     }
 
     override fun onDestroy() {
+        backtestProgressHandler.removeCallbacksAndMessages(null)
+        isBacktestScreenVisible = false
         super.onDestroy()
         quotesWebSocket?.close(1000, "Activity destroyed")
         liveHandler.removeCallbacksAndMessages(null)
@@ -1180,6 +1403,8 @@ private var isHomeScreenActive = false
     // ---------------------------------------------------------------------
 
     private fun showHome() {
+        isBacktestScreenVisible = false
+        backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
         bottomNav.setSelected(AltrixaDestination.HOME)
         clearContent()
         isHomeScreenActive = true
@@ -1244,6 +1469,25 @@ private var isHomeScreenActive = false
         )
         headerConnectionRow = brandRow
         card.addView(brandRow)
+
+        val authBanner = TextView(this).apply {
+            text = "⚠  FYERS Authentication Required\nGenerate a fresh access token to restore live market data."
+            textSize = 13f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(AltrixaColors.warning)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            visibility = if (fyersAuthRequired) View.VISIBLE else View.GONE
+        }
+        fyersAuthBanner = authBanner
+        card.addView(
+            authBanner,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+            }
+        )
 
         val titleRow = TextView(this).apply {
             text = "${selectedInstrument.displayName} · $selectedTimeframe"
@@ -1825,6 +2069,8 @@ private var isHomeScreenActive = false
     // ---------------------------------------------------------------------
 
     private fun showMarketData() {
+        isBacktestScreenVisible = false
+        backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
         bottomNav.setSelected(AltrixaDestination.MARKET_DATA)
         clearContent()
         // isLiveConnected reads the existing quotesWebSocket reference as-is —
@@ -1833,12 +2079,16 @@ private var isHomeScreenActive = false
     }
 
     private fun showStrategies() {
+        isBacktestScreenVisible = false
+        backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
         bottomNav.setSelected(AltrixaDestination.STRATEGIES)
         clearContent()
         StrategiesScreen.render(this, content)
     }
 
     private fun showExecution() {
+        isBacktestScreenVisible = false
+        backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
         bottomNav.setSelected(AltrixaDestination.EXECUTION)
         clearContent()
         ExecutionScreen.render(this, content)
@@ -1851,7 +2101,9 @@ private var selectedBacktestSizing: PositionSizing = PositionSizing.FixedQuantit
 
 
 private fun runBacktest() {
-    val uiCandles = candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]
+    val uiCandles = candlesByInstrument[
+        "${selectedInstrument.backendSymbol}|$selectedTimeframe"
+    ]
 
     if (uiCandles.isNullOrEmpty()) {
         Toast.makeText(
@@ -1898,71 +2150,87 @@ private fun runBacktest() {
         return
     }
 
-    content.removeAllViews()
-
-    val strategyFactory = StrategyFactory()
-
     if (selectedBacktestConfigurations.isEmpty()) {
-        selectedBacktestConfigurations = listOf(
-            "moving_average_crossover",
-            "rsi",
-            "macd",
-            "bollinger_bands",
-            "donchian_channel",
-            "donchian_ema",
-            "cpr_ema"
-        ).map { strategyId ->
-            StrategyConfiguration(strategyId)
-        }
+        Toast.makeText(
+            this,
+            "Select at least one strategy before running the backtest.",
+            Toast.LENGTH_LONG
+        ).show()
+        return
     }
 
-    val strategies = selectedBacktestConfigurations.map { configuration ->
-        strategyFactory.create(configuration)
-    }
-
-    BacktestScreen.renderRunning(
-        this,
-        content,
-        instrumentName = selectedInstrument.displayName,
-        timeframe = selectedTimeframe,
-        candleCount = domainCandles.size,
-        strategies = strategies
+    val instrument = com.algotrader.domain.Instrument(
+        symbol = selectedInstrument.backendSymbol,
+        exchange = selectedInstrument.backendSymbol.substringBefore(":")
     )
 
-    Thread {
-        try {
-            val config = BacktestConfig(
-                initialCapital = selectedBacktestCapital,
-                positionSizing = selectedBacktestSizing
-            )
+    val timeframe = when (selectedTimeframe) {
+        "5m" -> com.algotrader.domain.Timeframe.MINUTE_5
+        "15m" -> com.algotrader.domain.Timeframe.MINUTE_15
+        "30m" -> com.algotrader.domain.Timeframe.MINUTE_30
+        "1h" -> com.algotrader.domain.Timeframe.HOUR_1
+        "1D" -> com.algotrader.domain.Timeframe.DAY_1
+        else -> com.algotrader.domain.Timeframe.MINUTE_5
+    }
 
-            val runner = StrategyBacktestRunner(strategyFactory)
+    try {
+        val job = backtestJobStore.create(
+            instrument = instrument,
+            timeframe = timeframe,
+            strategies = selectedBacktestConfigurations,
+            initialCapital = selectedBacktestCapital,
+            positionSizing = selectedBacktestSizing,
+            candleCount = domainCandles.size
+        )
 
-            val results = selectedBacktestConfigurations.map { configuration ->
-                runner.run(
-                    configuration = configuration,
-                    candles = domainCandles,
-                    backtestConfig = config
-                )
-            }
+        backtestJobStore.saveCandles(job.id, domainCandles)
+        activeBacktestJobId = job.id
+        isBacktestScreenVisible = true
+        backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
 
-            runOnUiThread {
-                renderBacktestResults(results, domainCandles.size)
-            }
+        content.removeAllViews()
 
-        } catch (e: Exception) {
-            runOnUiThread {
-                content.removeAllViews()
-                BacktestScreen.renderError(
-                    this,
-                    content,
-                    e.message ?: "Backtest failed"
-                ) {
-                    runBacktest()
-                }
-            }
+        val strategies = selectedBacktestConfigurations.map {
+            StrategyFactory().create(it)
         }
-    }.start()
+
+        BacktestScreen.renderRunning(
+            this,
+            content,
+            instrumentName = selectedInstrument.displayName,
+            timeframe = selectedTimeframe,
+            candleCount = domainCandles.size,
+            strategies = strategies
+        )
+
+        val request = OneTimeWorkRequestBuilder<BacktestWorker>()
+            .setInputData(
+                workDataOf(
+                    BacktestWorker.KEY_JOB_ID to job.id
+                )
+            )
+            .addTag("altrixa_backtest")
+            .addTag("altrixa_backtest_${job.id}")
+            .build()
+
+        WorkManager.getInstance(applicationContext).enqueueUniqueWork(
+            "altrixa_backtest_${job.id}",
+            ExistingWorkPolicy.REPLACE,
+            request
+        )
+
+        backtestProgressHandler.post(backtestProgressRunnable)
+
+    } catch (e: Exception) {
+        content.removeAllViews()
+        BacktestScreen.renderError(
+            this,
+            content,
+            e.message ?: "Unable to start backtest"
+        ) {
+            runBacktest()
+        }
+    }
 }
 
 private fun renderBacktestResults(
@@ -1986,13 +2254,37 @@ private fun renderBacktestResults(
 }
 
 private fun showBacktest() {
+    bottomNav.setSelected(AltrixaDestination.BACKTEST)
     clearContent()
+
+    isBacktestScreenVisible = true
+    backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+
+    val jobId = activeBacktestJobId
+    if (jobId != null) {
+        val job = backtestJobStore.get(jobId)
+
+        if (job != null) {
+            restoreBacktestJob(job)
+            backtestProgressHandler.post(backtestProgressRunnable)
+            return
+        }
+
+        activeBacktestJobId = null
+    }
+
+    renderBacktestConfiguration()
+}
+
+private fun renderBacktestConfiguration() {
     BacktestScreen.renderConfig(
         this,
         content,
         instrumentName = selectedInstrument.displayName,
         timeframe = selectedTimeframe,
-        candleCount = candlesByInstrument["${selectedInstrument.backendSymbol}|$selectedTimeframe"]?.size ?: 0,
+        candleCount = candlesByInstrument[
+            "${selectedInstrument.backendSymbol}|$selectedTimeframe"
+        ]?.size ?: 0,
         initialCapital = 100_000.0,
         positionQuantity = 1.0,
         strategies = StrategyFactory().let { factory ->
@@ -2011,6 +2303,136 @@ private fun showBacktest() {
         selectedBacktestCapital = capital
         selectedBacktestSizing = sizing
         runBacktest()
+    }
+}
+
+private fun restoreBacktestJob(job: BacktestJobStore.Job) {
+    selectedBacktestConfigurations = job.strategies
+    selectedBacktestCapital = job.initialCapital
+    selectedBacktestSizing = job.positionSizing
+
+    val strategyFactory = StrategyFactory()
+    val strategies = job.strategies.map {
+        strategyFactory.create(it)
+    }
+
+    when (job.status) {
+        BacktestJobStore.Status.COMPLETED -> {
+            val results = backtestJobStore.getResults(job.id)
+
+            if (results.isNotEmpty()) {
+                BacktestScreen.renderResults(
+                    this,
+                    content,
+                    instrumentName = job.instrumentSymbol,
+                    timeframe = selectedTimeframe,
+                    candleCount = job.candleCount,
+                    initialCapital = job.initialCapital,
+                    positionSizing = job.positionSizing,
+                    results = results
+                ) {
+                    activeBacktestJobId = null
+                    renderBacktestConfiguration()
+                }
+            } else {
+                renderBacktestFailure(
+                    "Backtest completed, but its saved results could not be restored."
+                )
+            }
+        }
+
+        BacktestJobStore.Status.FAILED -> {
+            renderBacktestFailure(
+                job.errorMessage ?: "Backtest failed."
+            )
+        }
+
+        BacktestJobStore.Status.CANCELLED -> {
+            renderBacktestFailure(
+                "Backtest was cancelled."
+            )
+        }
+
+        else -> {
+            BacktestScreen.renderRunning(
+                this,
+                content,
+                instrumentName = job.instrumentSymbol,
+                timeframe = timeframeLabel(job.timeframe),
+                candleCount = job.candleCount,
+                strategies = strategies
+            )
+
+            content.addView(
+                TextView(this).apply {
+                    text = "Progress: ${job.progress}% · ${job.currentStep}"
+                    textSize = 14f
+                    setTextColor(AltrixaColors.textSecondary)
+                    setPadding(
+                        0,
+                        dp(AltrixaDimens.spaceSm),
+                        0,
+                        dp(AltrixaDimens.spaceSm)
+                    )
+                    tag = "BACKTEST_PROGRESS"
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+    }
+}
+
+private fun refreshBacktestJob(jobId: String) {
+    if (!isBacktestScreenVisible || activeBacktestJobId != jobId) return
+
+    val job = backtestJobStore.get(jobId) ?: return
+
+    when (job.status) {
+        BacktestJobStore.Status.COMPLETED,
+        BacktestJobStore.Status.FAILED,
+        BacktestJobStore.Status.CANCELLED -> {
+            backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+            restoreBacktestJob(job)
+        }
+
+        else -> {
+            val progressView = content.findViewWithTag<TextView>(
+                "BACKTEST_PROGRESS"
+            )
+
+            progressView?.text =
+                "Progress: ${job.progress}% · ${job.currentStep}"
+        }
+    }
+}
+
+private fun renderBacktestFailure(message: String) {
+    content.removeAllViews()
+
+    BacktestScreen.renderError(
+        this,
+        content,
+        message
+    ) {
+        activeBacktestJobId = null
+        renderBacktestConfiguration()
+    }
+}
+
+private fun timeframeLabel(
+    timeframe: com.algotrader.domain.Timeframe
+): String {
+    return when (timeframe) {
+        com.algotrader.domain.Timeframe.MINUTE_1 -> "1m"
+        com.algotrader.domain.Timeframe.MINUTE_5 -> "5m"
+        com.algotrader.domain.Timeframe.MINUTE_15 -> "15m"
+        com.algotrader.domain.Timeframe.MINUTE_30 -> "30m"
+        com.algotrader.domain.Timeframe.HOUR_1 -> "1h"
+        com.algotrader.domain.Timeframe.HOUR_4 -> "4h"
+        com.algotrader.domain.Timeframe.DAY_1 -> "1D"
     }
 }
 }
