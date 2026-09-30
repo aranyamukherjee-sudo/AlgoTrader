@@ -67,6 +67,9 @@ AUTH_ERROR_CODES = {-8, -15, -16, -17, -99}
 AUTH_REQUIRED_STATE = "auth_required"
 AUTHENTICATED_STATE = "authenticated"
 
+RENDER_API_BASE_URL = "https://api.render.com/v1"
+RENDER_TOKEN_ENV_KEY = "FYERS_ACCESS_TOKEN"
+
 def classify_fyers_error(error):
     code = None
 
@@ -278,6 +281,74 @@ def validate_fyers_access_token(access_token):
         return False, f"FYERS token validation failed: {error}"
 
 
+def persist_fyers_access_token_to_render(access_token):
+    """
+    Persist the validated FYERS access token to Render and trigger
+    a deployment so future restarts use the new token.
+    """
+    render_api_key = os.getenv("RENDER_API_KEY")
+    service_id = os.getenv("RENDER_SERVICE_ID")
+
+    if not render_api_key:
+        return False, "RENDER_API_KEY is not configured"
+
+    if not service_id:
+        return False, "RENDER_SERVICE_ID is not configured"
+
+    env_url = (
+        f"{RENDER_API_BASE_URL}/services/"
+        f"{service_id}/env-vars/{RENDER_TOKEN_ENV_KEY}"
+    )
+
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {render_api_key}",
+    }
+
+    try:
+        env_response = requests.put(
+            env_url,
+            headers=headers,
+            json={"value": access_token},
+            timeout=15,
+        )
+
+        if not env_response.ok:
+            return (
+                False,
+                "Render environment update failed "
+                f"(HTTP {env_response.status_code})",
+            )
+
+        deploy_url = (
+            f"{RENDER_API_BASE_URL}/services/"
+            f"{service_id}/deploys"
+        )
+
+        deploy_response = requests.post(
+            deploy_url,
+            headers=headers,
+            json={
+                "clearCache": "do_not_clear",
+                "deployMode": "build_and_deploy",
+            },
+            timeout=15,
+        )
+
+        if not deploy_response.ok:
+            return (
+                False,
+                "Render deploy trigger failed "
+                f"(HTTP {deploy_response.status_code})",
+            )
+
+        return True, None
+
+    except requests.RequestException as error:
+        return False, f"Render API request failed: {error}"
+
+
 def replace_fyers_access_token(access_token):
     """
     Atomically validate and switch the running FYERS connection.
@@ -321,6 +392,27 @@ def replace_fyers_access_token(access_token):
 
             print(
                 "FYERS access token replaced successfully.",
+                flush=True,
+            )
+
+            persisted, persistence_error = (
+                persist_fyers_access_token_to_render(access_token)
+            )
+
+            if not persisted:
+                print(
+                    "FYERS token accepted, but Render persistence "
+                    f"failed: {persistence_error}",
+                    flush=True,
+                )
+                return True, (
+                    "Token accepted and FYERS reconnect started, "
+                    f"but Render persistence failed: {persistence_error}"
+                )
+
+            print(
+                "FYERS access token persisted to Render; "
+                "deploy triggered.",
                 flush=True,
             )
 
@@ -430,13 +522,21 @@ def update_auth_token(payload: dict):
             "auth_required": fyers_status == AUTH_REQUIRED_STATE,
         }
 
-    return {
+    response = {
         "status": "ok",
-        "message": "FYERS access token accepted; reconnecting",
+        "message": (
+            "FYERS access token accepted; reconnecting "
+            "and persisting to Render"
+        ),
         "fyers": fyers_status,
         "authenticated": False,
         "auth_required": False,
     }
+
+    if error_message:
+        response["persistence_warning"] = error_message
+
+    return response
 
 
 @app.get("/auth/status")
