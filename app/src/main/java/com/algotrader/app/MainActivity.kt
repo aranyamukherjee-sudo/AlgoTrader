@@ -36,6 +36,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -166,6 +168,11 @@ class MainActivity : Activity() {
     // reasons, while auth_required is a specific backend authentication state.
     private var fyersAuthRequired = false
     private var fyersAuthNotificationShown = false
+
+    // State returned by /auth/fyers/start and retained while the
+    // browser completes the FYERS -100 login + MFA flow.
+    private var pendingFyersOAuthState: String? = null
+    private var fyersOAuthBrowserOpened = false
     private var fyersAuthBanner: TextView? = null
 
     // Single background thread for all disk cache reads/writes: keeps file
@@ -586,14 +593,21 @@ private var isHomeScreenActive = false
                         val authUrl =
                             root.optString("auth_url", "").trim()
 
+                        val state =
+                            root.optString("state", "").trim()
+
                         if (
                             root.optString("status") != "ok" ||
-                            authUrl.isEmpty()
+                            authUrl.isEmpty() ||
+                            state.isEmpty()
                         ) {
                             throw IllegalStateException(
-                                "Authentication URL unavailable"
+                                "FYERS authentication session unavailable"
                             )
                         }
+
+                        pendingFyersOAuthState = state
+                        fyersOAuthBrowserOpened = true
 
                         runOnUiThread {
                             try {
@@ -605,13 +619,23 @@ private var isHomeScreenActive = false
 
                                 startActivity(browserIntent)
 
+                                android.widget.Toast.makeText(
+                                    this@MainActivity,
+                                    "Complete FYERS login and MFA, then return to ALTRIXA.",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+
                             } catch (_: Exception) {
+                                pendingFyersOAuthState = null
+                                fyersOAuthBrowserOpened = false
+
                                 android.widget.Toast.makeText(
                                     this@MainActivity,
                                     "No browser is available to open FYERS authentication.",
                                     android.widget.Toast.LENGTH_LONG
                                 ).show()
                             }
+
                         }
 
                     } catch (_: Exception) {
@@ -627,6 +651,196 @@ private var isHomeScreenActive = false
             }
         })
     }
+
+    /**
+     * Shows the temporary FYERS authorization-code entry dialog.
+     *
+     * The auth code is sent directly to the backend over HTTPS and
+     * is never persisted locally or displayed after submission.
+     */
+    private fun showFyersAuthCodeDialog() {
+        val state = pendingFyersOAuthState
+
+        if (state.isNullOrBlank()) {
+            android.widget.Toast.makeText(
+                this,
+                "No active FYERS authentication session. Start renewal again.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val input = android.widget.EditText(this).apply {
+            hint = "Paste FYERS auth code"
+            inputType =
+                android.text.InputType.TYPE_CLASS_TEXT or
+                    android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+            setSingleLine(true)
+            setPadding(40, 20, 40, 10)
+        }
+
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("FYERS Authorization Code")
+            .setMessage(
+                "After FYERS login and MFA, paste the temporary auth code shown by FYERS here."
+            )
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Continue", null)
+            .create()
+
+        dialog.setOnShowListener {
+            val continueButton =
+                dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
+
+            continueButton.setOnClickListener {
+                val authCode = input.text?.toString()?.trim().orEmpty()
+
+                if (authCode.isBlank()) {
+                    input.error = "Auth code is required"
+                    return@setOnClickListener
+                }
+
+                continueButton.isEnabled = false
+                input.isEnabled = false
+
+                exchangeFyersAuthCode(
+                    authCode = authCode,
+                    state = state,
+                    dialog = dialog,
+                    input = input
+                )
+            }
+        }
+
+        dialog.show()
+    }
+
+    private fun exchangeFyersAuthCode(
+        authCode: String,
+        state: String,
+        dialog: android.app.AlertDialog,
+        input: android.widget.EditText
+    ) {
+        val json = JSONObject().apply {
+            put("auth_code", authCode)
+            put("state", state)
+        }
+
+        val requestBody =
+            json.toString().toRequestBody(
+                "application/json; charset=utf-8".toMediaType()
+            )
+
+        val request = Request.Builder()
+            .url("$BACKEND_HTTP_BASE/auth/fyers/exchange-code")
+            .post(requestBody)
+            .build()
+
+        OkHttpClient().newCall(request).enqueue(object : okhttp3.Callback {
+
+            override fun onFailure(
+                call: okhttp3.Call,
+                e: java.io.IOException
+            ) {
+                runOnUiThread {
+                    dialog.getButton(
+                        android.app.AlertDialog.BUTTON_POSITIVE
+                    )?.isEnabled = true
+
+                    dialog.getButton(
+                        android.app.AlertDialog.BUTTON_NEGATIVE
+                    )?.isEnabled = true
+
+                    android.widget.Toast.makeText(
+                        this@MainActivity,
+                        "Could not contact ALTRIXA server. Check your connection.",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+
+            override fun onResponse(
+                call: okhttp3.Call,
+                response: okhttp3.Response
+            ) {
+                response.use { res ->
+
+                    val body = res.body?.string().orEmpty()
+
+                    try {
+                        val root = JSONObject(body)
+                        val status = root.optString("status", "")
+                        val message =
+                            root.optString("message", "").trim()
+
+                        if (res.isSuccessful && status == "ok") {
+                            pendingFyersOAuthState = null
+                            fyersOAuthBrowserOpened = false
+
+                            runOnUiThread {
+                                dialog.dismiss()
+
+                                android.widget.Toast.makeText(
+                                    this@MainActivity,
+                                    "FYERS authentication renewed.",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+
+                                clearFyersAuthRequired()
+
+                                val notificationManager =
+                                    getSystemService(Context.NOTIFICATION_SERVICE)
+                                        as NotificationManager
+
+                                notificationManager.cancel(
+                                    FYERS_AUTH_NOTIFICATION_ID
+                                )
+
+                                connectQuotesWebSocket()
+                            }
+
+                            return
+                        }
+
+                        runOnUiThread {
+                            dialog.getButton(
+                                android.app.AlertDialog.BUTTON_POSITIVE
+                            )?.isEnabled = true
+
+                            input.isEnabled = true
+
+                            android.widget.Toast.makeText(
+                                this@MainActivity,
+                                if (message.isNotBlank()) {
+                                    "FYERS authentication failed: $message"
+                                } else {
+                                    "FYERS authentication failed."
+                                },
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
+
+                    } catch (_: Exception) {
+                        runOnUiThread {
+                            dialog.getButton(
+                                android.app.AlertDialog.BUTTON_POSITIVE
+                            )?.isEnabled = true
+
+                            input.isEnabled = true
+
+                            android.widget.Toast.makeText(
+                                this@MainActivity,
+                                "FYERS authentication failed.",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            }
+        })
+    }
+
 
     private fun showFyersAuthNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -1397,6 +1611,21 @@ private var isHomeScreenActive = false
     // ---------------------------------------------------------------------
     // Activity lifecycle
     // ---------------------------------------------------------------------
+
+    override fun onResume() {
+        super.onResume()
+
+        if (fyersOAuthBrowserOpened &&
+            !isFinishing &&
+            pendingFyersOAuthState != null
+        ) {
+            fyersOAuthBrowserOpened = false
+
+            window.decorView.post {
+                showFyersAuthCodeDialog()
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         backtestJobStore = BacktestJobStore(applicationContext)
