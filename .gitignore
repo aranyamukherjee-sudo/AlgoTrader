@@ -53,3 +53,4 @@ fyers_ws_test.py
 .secrets/
 backend/.env
 fyers_tokens.json
+fyers_access_token.txt

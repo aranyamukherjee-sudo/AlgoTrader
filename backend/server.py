@@ -3,9 +3,12 @@ import asyncio
 import threading
 import time
 import requests
+import secrets
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, WebSocket
+from fastapi.responses import RedirectResponse
 from fyers_apiv3.FyersWebsocket import data_ws
 from fyers_apiv3 import fyersModel
 
@@ -47,6 +50,22 @@ HISTORY_CACHE_TTL = 5 * 60
 # Serializes live FYERS token replacement so two Android requests
 # cannot replace the active connection at the same time.
 token_update_lock = threading.Lock()
+
+# ------------------------------------------------------------
+# FYERS OAuth browser-flow state
+# ------------------------------------------------------------
+#
+# The OAuth state is short-lived and single-use. It prevents an
+# unsolicited/replayed FYERS callback from being accepted.
+fyers_oauth_state_lock = threading.Lock()
+fyers_oauth_state = None
+fyers_oauth_state_created_at = 0.0
+FYERS_OAUTH_STATE_TTL = 10 * 60
+
+FYERS_OAUTH_REDIRECT_URI_DEFAULT = (
+    "https://algotrader-backend-kras.onrender.com/auth/fyers/callback"
+)
+ALTRIXA_OAUTH_CALLBACK_URI = "altrixa://fyers-auth"
 
 
 def on_message(message):
@@ -479,6 +498,177 @@ def health():
         "auth_required": fyers_status == AUTH_REQUIRED_STATE,
         "last_error": last_fyers_error,
     }
+
+
+
+@app.get("/auth/fyers/start")
+def start_fyers_oauth():
+    """
+    Start the server-side FYERS OAuth browser flow.
+
+    No FYERS secret or access token is exposed to Android.
+    """
+    global fyers_oauth_state, fyers_oauth_state_created_at
+
+    app_id = os.getenv("FYERS_APP_ID")
+    redirect_uri = os.getenv(
+        "FYERS_OAUTH_REDIRECT_URI",
+        FYERS_OAUTH_REDIRECT_URI_DEFAULT,
+    )
+
+    if not app_id:
+        return {
+            "status": "error",
+            "message": "FYERS_APP_ID is not configured",
+        }
+
+    state = secrets.token_urlsafe(32)
+
+    with fyers_oauth_state_lock:
+        fyers_oauth_state = state
+        fyers_oauth_state_created_at = time.time()
+
+    params = {
+        "client_id": app_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "state": state,
+    }
+
+    auth_url = (
+        "https://api-t1.fyers.in/api/v3/generate-authcode?"
+        + urllib.parse.urlencode(params)
+    )
+
+    return {
+        "status": "ok",
+        "auth_url": auth_url,
+    }
+
+
+@app.get("/auth/fyers/callback")
+def fyers_oauth_callback(
+    auth_code: str = "",
+    code: str = "",
+    state: str = "",
+    s: str = "",
+    message: str = "",
+):
+    """
+    Receive the FYERS OAuth callback, exchange the authorization code
+    server-side, replace the active access token, and redirect the
+    browser back into ALTRIXA.
+
+    The FYERS App Secret and access token never leave the backend.
+    """
+    global fyers_oauth_state, fyers_oauth_state_created_at
+
+    callback_state = str(state or "").strip()
+    auth_code_value = str(auth_code or code or "").strip()
+
+    with fyers_oauth_state_lock:
+        expected_state = fyers_oauth_state
+        created_at = fyers_oauth_state_created_at
+
+        # Consume the state immediately so it cannot be replayed.
+        fyers_oauth_state = None
+        fyers_oauth_state_created_at = 0.0
+
+    if (
+        not expected_state
+        or not callback_state
+        or callback_state != expected_state
+        or time.time() - created_at > FYERS_OAUTH_STATE_TTL
+    ):
+        return RedirectResponse(
+            url=ALTRIXA_OAUTH_CALLBACK_URI
+            + "?status=error&reason=invalid_state"
+        )
+
+    if not auth_code_value:
+        reason = urllib.parse.quote(
+            str(message or s or "authorization_code_missing")
+        )
+        return RedirectResponse(
+            url=ALTRIXA_OAUTH_CALLBACK_URI
+            + f"?status=error&reason={reason}"
+        )
+
+    app_id = os.getenv("FYERS_APP_ID")
+    secret_key = os.getenv("FYERS_APP_SECRET")
+    redirect_uri = os.getenv(
+        "FYERS_OAUTH_REDIRECT_URI",
+        FYERS_OAUTH_REDIRECT_URI_DEFAULT,
+    )
+
+    if not app_id or not secret_key:
+        print(
+            "FYERS OAuth exchange unavailable: "
+            "FYERS_APP_ID or FYERS_APP_SECRET is not configured.",
+            flush=True,
+        )
+        return RedirectResponse(
+            url=ALTRIXA_OAUTH_CALLBACK_URI
+            + "?status=error&reason=server_auth_not_configured"
+        )
+
+    try:
+        session = fyersModel.SessionModel(
+            client_id=app_id,
+            secret_key=secret_key,
+            redirect_uri=redirect_uri,
+            response_type="code",
+            grant_type="authorization_code",
+        )
+
+        session.set_token(auth_code_value)
+        response = session.generate_token()
+
+        print(
+            "FYERS OAuth token exchange completed: "
+            f"status={response.get('s')} "
+            f"code={response.get('code')}",
+            flush=True,
+        )
+
+        access_token = response.get("access_token")
+
+        if not access_token:
+            reason = urllib.parse.quote(
+                str(response.get("message") or "token_exchange_failed")
+            )
+            return RedirectResponse(
+                url=ALTRIXA_OAUTH_CALLBACK_URI
+                + f"?status=error&reason={reason}"
+            )
+
+        success, error_message = replace_fyers_access_token(access_token)
+
+        if not success:
+            reason = urllib.parse.quote(
+                str(error_message or "token_replacement_failed")
+            )
+            return RedirectResponse(
+                url=ALTRIXA_OAUTH_CALLBACK_URI
+                + f"?status=error&reason={reason}"
+            )
+
+        return RedirectResponse(
+            url=ALTRIXA_OAUTH_CALLBACK_URI
+            + "?status=success"
+        )
+
+    except Exception as error:
+        print(
+            f"FYERS OAuth exchange failed: {error}",
+            flush=True,
+        )
+
+        reason = urllib.parse.quote(str(error))
+        return RedirectResponse(
+            url=ALTRIXA_OAUTH_CALLBACK_URI
+            + f"?status=error&reason={reason}"
+        )
 
 
 @app.post("/auth/update-token")
