@@ -1619,11 +1619,17 @@ private var isHomeScreenActive = false
             !isFinishing &&
             pendingFyersOAuthState != null
         ) {
-            fyersOAuthBrowserOpened = false
-
-            window.decorView.post {
-                showFyersAuthCodeDialog()
-            }
+            // Give the browser-to-ALTRIXA lifecycle transition time to settle.
+            // Only consume the pending OAuth state if it is still active.
+            window.decorView.postDelayed({
+                if (!isFinishing &&
+                    fyersOAuthBrowserOpened &&
+                    pendingFyersOAuthState != null
+                ) {
+                    fyersOAuthBrowserOpened = false
+                    showFyersAuthCodeDialog()
+                }
+            }, 750)
         }
     }
 
