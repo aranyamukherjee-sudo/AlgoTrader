@@ -106,6 +106,7 @@ class MainActivity : Activity() {
         private const val FYERS_AUTH_NOTIFICATION_CHANNEL = "fyers_auth"
         private const val FYERS_AUTH_NOTIFICATION_ID = 4201
         private const val FYERS_AUTH_REQUIRED = "auth_required"
+        private const val FYERS_AUTH_RENEW_ACTION = "com.algotrader.app.FYERS_AUTH_RENEW"
         private val TIMEFRAMES = listOf("5m", "15m", "30m", "1h", "1D")
 
         // Persistent historical-candle disk cache.
@@ -465,6 +466,168 @@ private var isHomeScreenActive = false
         }
     }
 
+    /**
+     * Handles the browser -> ALTRIXA FYERS OAuth callback.
+     *
+     * Only the callback status is consumed by Android.
+     * The FYERS authorization code and access token remain server-side.
+     */
+    private fun handleFyersOAuthCallback(uri: android.net.Uri?) {
+        if (uri == null ||
+            uri.scheme != "altrixa" ||
+            uri.host != "fyers-auth"
+        ) {
+            return
+        }
+
+        val status = uri.getQueryParameter("status").orEmpty()
+
+        if (status == "success") {
+            runOnUiThread {
+                android.widget.Toast.makeText(
+                    this,
+                    "FYERS authentication renewed.",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+
+                clearFyersAuthRequired()
+
+                val notificationManager =
+                    getSystemService(Context.NOTIFICATION_SERVICE)
+                        as NotificationManager
+
+                notificationManager.cancel(FYERS_AUTH_NOTIFICATION_ID)
+
+                connectQuotesWebSocket()
+            }
+
+            return
+        }
+
+        if (status == "error") {
+            val reason =
+                uri.getQueryParameter("reason")
+                    ?.replace('_', ' ')
+                    ?.take(120)
+                    .orEmpty()
+
+            runOnUiThread {
+                android.widget.Toast.makeText(
+                    this,
+                    if (reason.isNotBlank()) {
+                        "FYERS authentication failed: $reason"
+                    } else {
+                        "FYERS authentication failed."
+                    },
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
+
+    /**
+     * Starts the server-side FYERS OAuth browser flow.
+     *
+     * Android never receives the FYERS App Secret or access token.
+     * The backend generates the short-lived OAuth URL and performs
+     * the authorization-code exchange server-side.
+     */
+    private fun startFyersOAuthRenewal() {
+        runOnUiThread {
+            android.widget.Toast.makeText(
+                this,
+                "Opening FYERS authentication…",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        val request = Request.Builder()
+            .url("$BACKEND_HTTP_BASE/auth/fyers/start")
+            .get()
+            .build()
+
+        OkHttpClient().newCall(request).enqueue(object : okhttp3.Callback {
+
+            override fun onFailure(
+                call: okhttp3.Call,
+                e: java.io.IOException
+            ) {
+                runOnUiThread {
+                    android.widget.Toast.makeText(
+                        this@MainActivity,
+                        "Could not start FYERS authentication. Check your connection.",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+
+            override fun onResponse(
+                call: okhttp3.Call,
+                response: okhttp3.Response
+            ) {
+                response.use { res ->
+
+                    val body = res.body?.string().orEmpty()
+
+                    if (!res.isSuccessful) {
+                        runOnUiThread {
+                            android.widget.Toast.makeText(
+                                this@MainActivity,
+                                "FYERS authentication could not be started.",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
+                        return
+                    }
+
+                    try {
+                        val root = JSONObject(body)
+
+                        val authUrl =
+                            root.optString("auth_url", "").trim()
+
+                        if (
+                            root.optString("status") != "ok" ||
+                            authUrl.isEmpty()
+                        ) {
+                            throw IllegalStateException(
+                                "Authentication URL unavailable"
+                            )
+                        }
+
+                        runOnUiThread {
+                            try {
+                                val browserIntent =
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse(authUrl)
+                                    )
+
+                                startActivity(browserIntent)
+
+                            } catch (_: Exception) {
+                                android.widget.Toast.makeText(
+                                    this@MainActivity,
+                                    "No browser is available to open FYERS authentication.",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+
+                    } catch (_: Exception) {
+                        runOnUiThread {
+                            android.widget.Toast.makeText(
+                                this@MainActivity,
+                                "FYERS authentication could not be started.",
+                                android.widget.Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     private fun showFyersAuthNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -495,6 +658,7 @@ private var isHomeScreenActive = false
         val intent = android.content.Intent(this, MainActivity::class.java).apply {
             flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or
                 android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+            action = FYERS_AUTH_RENEW_ACTION
         }
 
         val pendingIntent = PendingIntent.getActivity(
@@ -1247,6 +1411,12 @@ private var isHomeScreenActive = false
         buildApp()
         connectQuotesWebSocket()
 
+        if (intent?.action == FYERS_AUTH_RENEW_ACTION) {
+            startFyersOAuthRenewal()
+        }
+
+        handleFyersOAuthCallback(intent?.data)
+
         if (activeBacktestJobId != null) {
             showBacktest()
         } else {
@@ -1257,6 +1427,12 @@ private var isHomeScreenActive = false
     override fun onNewIntent(intent: android.content.Intent?) {
         super.onNewIntent(intent)
         setIntent(intent)
+
+        if (intent?.action == FYERS_AUTH_RENEW_ACTION) {
+            startFyersOAuthRenewal()
+        }
+
+        handleFyersOAuthCallback(intent?.data)
 
         intent?.getStringExtra(BacktestWorker.EXTRA_BACKTEST_JOB_ID)?.let {
             selectedBacktestJobId = it
