@@ -5,8 +5,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import androidx.work.Data
+import androidx.work.ForegroundInfo
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
@@ -20,6 +22,10 @@ import com.algotrader.strategyengine.StrategyFactory
  *
  * It deliberately has no dependency on Activity/View state.
  */
+private const val FOREGROUND_NOTIFICATION_ID = 4101
+private const val FOREGROUND_CHANNEL_ID = "altrixa_backtest_running"
+private const val FOREGROUND_CHANNEL_NAME = "Backtest Running"
+
 class BacktestWorker(
     appContext: Context,
     workerParams: WorkerParameters
@@ -39,14 +45,31 @@ class BacktestWorker(
             )
 
         return try {
-            update(jobId, BacktestJobStore.Status.PREPARING, 5, "Preparing historical data")
+            setForegroundAsync(
+                createForegroundInfo(
+                    "Preparing backtest…",
+                    0
+                )
+            ).get()
+
+            update(
+                jobId,
+                BacktestJobStore.Status.PREPARING,
+                5,
+                "Preparing historical data"
+            )
 
             val candles = store.getCandles(jobId)
             require(candles.size >= 50) {
                 "Not enough persisted candles for the backtest (${candles.size})"
             }
 
-            update(jobId, BacktestJobStore.Status.RUNNING, 10, "Loading strategies")
+            update(
+                jobId,
+                BacktestJobStore.Status.RUNNING,
+                10,
+                "Loading strategies"
+            )
 
             val factory = StrategyFactory()
             val runner = StrategyBacktestRunner(factory)
@@ -56,42 +79,153 @@ class BacktestWorker(
                 positionSizing = job.positionSizing
             )
 
-            val results = mutableListOf<com.algotrader.backtest.BacktestResult>()
+            val checkpoint = store.getCheckpoint(jobId)
+
+            val startedAtMillis =
+                checkpoint?.startedAtMillis
+                    ?: System.currentTimeMillis()
+
+            val results = checkpoint
+                ?.results
+                ?.toMutableList()
+                ?: mutableListOf()
+
             val total = job.strategies.size
+            val completedCount = results.size
+
+            require(completedCount <= total) {
+                "Backtest checkpoint is invalid: $completedCount/$total strategies completed"
+            }
+
+            if (completedCount > 0) {
+                update(
+                    jobId,
+                    BacktestJobStore.Status.RUNNING,
+                    calculateOverallProgress(
+                        completedCount,
+                        total,
+                        100
+                    ),
+                    "Resuming · ${completedCount}/${total} strategies complete · ETA ${formatEta(
+                        estimateRemainingMillis(
+                            startedAtMillis,
+                            completedCount,
+                            total
+                        )
+                    )}"
+                )
+            }
 
             job.strategies.forEachIndexed { index, strategyConfiguration ->
-                if (isStopped) {
-                    store.cancel(jobId)
-                    return Result.failure(
-                        workDataOf(KEY_ERROR to "Backtest cancelled")
-                    )
+
+                // Completed strategies are persisted in the checkpoint.
+                // Skip them after a WorkManager retry.
+                if (index < completedCount) {
+                    return@forEachIndexed
                 }
 
-                val startPercent = 10 + ((index.toDouble() / total) * 75.0).toInt()
+                if (isStopped) {
+                    store.update(
+                        jobId,
+                        BacktestJobStore.Status.RUNNING,
+                        job.progress,
+                        "Interrupted by WorkManager; waiting for retry"
+                    )
+                    return Result.retry()
+                }
+
+                val strategyName =
+                    displayStrategyName(strategyConfiguration.strategyId)
 
                 update(
                     jobId,
                     BacktestJobStore.Status.RUNNING,
-                    startPercent,
-                    "Processing ${strategyConfiguration.strategyId}"
+                    calculateOverallProgress(index, total, 0),
+                    "Processing $strategyName · ETA ${formatEta(
+                        estimateRemainingMillis(
+                            startedAtMillis,
+                            index,
+                            total
+                        )
+                    )}"
                 )
 
                 val result = runner.run(
                     configuration = strategyConfiguration,
                     candles = candles,
                     backtestConfig = config
-                )
+                ) { processed, candleTotal ->
+
+                    if (isStopped) return@run
+
+                    val localProgress = if (candleTotal <= 0) {
+                        100
+                    } else {
+                        ((processed.toDouble() / candleTotal.toDouble()) * 100.0)
+                            .toInt()
+                            .coerceIn(0, 100)
+                    }
+
+                    val overallProgress =
+                        calculateOverallProgress(
+                            index,
+                            total,
+                            localProgress
+                        )
+
+                    val etaMillis = estimateRemainingMillis(
+                        startedAtMillis,
+                        index,
+                        total,
+                        localProgress
+                    )
+
+                    update(
+                        jobId,
+                        BacktestJobStore.Status.RUNNING,
+                        overallProgress,
+                        "Processing $strategyName · $processed/$candleTotal candles · ETA ${formatEta(etaMillis)}"
+                    )
+                }
 
                 results += result
 
+                android.util.Log.i(
+                    "ALTRIXA_BACKTEST",
+                    "RESULT BEFORE SAVE: strategy=$strategyName " +
+                        "trades=${result.trades.size} " +
+                        "equityCurve=${result.equityCurve.size} " +
+                        "finalEquity=${result.finalEquity} " +
+                        "totalTrades=${result.metrics.totalTrades}"
+                )
+
+                // Durable checkpoint AFTER the strategy has fully completed.
+                // If WorkManager interrupts later, completed strategies will
+                // not be rerun.
+                store.saveCheckpoint(
+                    jobId = jobId,
+                    startedAtMillis = startedAtMillis,
+                    results = results
+                )
+
                 val completedPercent =
-                    10 + (((index + 1).toDouble() / total) * 75.0).toInt()
+                    calculateOverallProgress(
+                        index + 1,
+                        total,
+                        0
+                    )
+
+                val remainingEta = estimateRemainingMillis(
+                    startedAtMillis,
+                    index + 1,
+                    total
+                )
 
                 update(
                     jobId,
                     BacktestJobStore.Status.RUNNING,
                     completedPercent,
-                    "Completed ${strategyConfiguration.strategyId}"
+                    "Completed $strategyName · ${index + 1}/$total · ETA ${formatEta(remainingEta)}"
                 )
             }
 
@@ -99,7 +233,7 @@ class BacktestWorker(
                 jobId,
                 BacktestJobStore.Status.CALCULATING,
                 90,
-                "Calculating performance"
+                "Calculating performance · ETA <1m"
             )
 
             require(results.isNotEmpty()) {
@@ -113,8 +247,64 @@ class BacktestWorker(
                 "Saving backtest results"
             )
 
+            update(
+                jobId,
+                BacktestJobStore.Status.SAVING,
+                95,
+                "Saving results: starting"
+            )
+            android.util.Log.i(
+                "ALTRIXA_BACKTEST",
+                "ALL RESULTS BEFORE SAVE: count=${results.size} " +
+                    results.joinToString(" | ") { r ->
+                        "${r.strategyName}:trades=${r.trades.size},equity=${r.equityCurve.size}"
+                    }
+            )
+
             store.saveResults(jobId, results)
-            store.complete(jobId)
+
+            android.util.Log.i(
+                "ALTRIXA_BACKTEST",
+                "SAVE RESULTS RETURNED SUCCESSFULLY: jobId=$jobId"
+            )
+
+            update(
+                jobId,
+                BacktestJobStore.Status.SAVING,
+                96,
+                "Saving results: finished"
+            )
+
+            update(
+                jobId,
+                BacktestJobStore.Status.SAVING,
+                97,
+                "Clearing checkpoint: starting"
+            )
+
+            store.clearCheckpoint(jobId)
+
+            update(
+                jobId,
+                BacktestJobStore.Status.SAVING,
+                98,
+                "Clearing checkpoint: finished"
+            )
+
+            update(
+                jobId,
+                BacktestJobStore.Status.SAVING,
+                99,
+                "Completing backtest"
+            )
+
+            store.update(
+                jobId = jobId,
+                status = BacktestJobStore.Status.COMPLETED,
+                progress = 100,
+                currentStep = "Complete",
+                errorMessage = null
+            )
 
             setProgressAsync(
                 workDataOf(
@@ -146,6 +336,162 @@ class BacktestWorker(
                     KEY_JOB_ID to jobId,
                     KEY_ERROR to message
                 )
+            )
+        }
+    }
+
+    private fun displayStrategyName(strategyId: String): String {
+        return when (strategyId) {
+            "moving_average_crossover" -> "Moving Average Crossover"
+            "rsi" -> "RSI"
+            "macd" -> "MACD"
+            "bollinger_bands" -> "Bollinger Bands"
+            "donchian_channel" -> "Donchian Channel"
+            "donchian_ema" -> "Donchian EMA"
+            "cpr_ema" -> "CPR + EMA"
+            else -> strategyId
+        }
+    }
+
+    private fun calculateOverallProgress(
+        completedStrategies: Int,
+        totalStrategies: Int,
+        localProgress: Int
+    ): Int {
+        if (totalStrategies <= 0) return 10
+
+        return (
+            10.0 +
+                (
+                    (
+                        completedStrategies.toDouble() +
+                            (localProgress.coerceIn(0, 100) / 100.0)
+                    ) / totalStrategies.toDouble()
+                ) * 75.0
+            ).toInt().coerceIn(10, 85)
+    }
+
+    private fun estimateRemainingMillis(
+        startedAtMillis: Long,
+        completedStrategies: Int,
+        totalStrategies: Int,
+        localProgress: Int = 0
+    ): Long {
+        val elapsed = (System.currentTimeMillis() - startedAtMillis)
+            .coerceAtLeast(1L)
+
+        val completedEquivalent =
+            completedStrategies.toDouble() +
+                localProgress.coerceIn(0, 100) / 100.0
+
+        if (completedEquivalent <= 0.0 || totalStrategies <= 0) {
+            return 0L
+        }
+
+        val averagePerStrategy =
+            elapsed.toDouble() / completedEquivalent
+
+        val remaining =
+            (totalStrategies.toDouble() - completedEquivalent)
+                .coerceAtLeast(0.0)
+
+        return (averagePerStrategy * remaining)
+            .toLong()
+            .coerceAtLeast(0L)
+    }
+
+    private fun formatEta(milliseconds: Long): String {
+        if (milliseconds <= 0L) return "<1m"
+
+        val totalSeconds =
+            ((milliseconds + 999L) / 1000L).coerceAtLeast(1L)
+
+        val hours = totalSeconds / 3600L
+        val minutes = (totalSeconds % 3600L) / 60L
+        val seconds = totalSeconds % 60L
+
+        return when {
+            hours > 0L ->
+                "%dh %02dm".format(hours, minutes)
+
+            minutes > 0L ->
+                "%dm %02ds".format(minutes, seconds)
+
+            else ->
+                "%ds".format(seconds)
+        }
+    }
+
+    private fun createForegroundInfo(
+        message: String,
+        progress: Int
+    ): ForegroundInfo {
+        val manager = applicationContext.getSystemService(
+            Context.NOTIFICATION_SERVICE
+        ) as NotificationManager
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    FOREGROUND_CHANNEL_ID,
+                    FOREGROUND_CHANNEL_NAME,
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Active ALTRIXA backtest progress"
+                }
+            )
+        }
+
+        val intent = Intent(
+            applicationContext,
+            MainActivity::class.java
+        ).apply {
+            flags =
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            applicationContext,
+            FOREGROUND_NOTIFICATION_ID,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentFlags()
+        )
+
+        val builder =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                android.app.Notification.Builder(
+                    applicationContext,
+                    FOREGROUND_CHANNEL_ID
+                )
+            } else {
+                android.app.Notification.Builder(applicationContext)
+            }
+
+        val notification = builder
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle("ALTRIXA Backtest Running")
+            .setContentText(message)
+            .setProgress(
+                100,
+                progress.coerceIn(0, 100),
+                false
+            )
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(
+                FOREGROUND_NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            ForegroundInfo(
+                FOREGROUND_NOTIFICATION_ID,
+                notification
             )
         }
     }

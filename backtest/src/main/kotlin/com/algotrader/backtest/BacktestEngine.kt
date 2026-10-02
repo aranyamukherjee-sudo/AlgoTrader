@@ -43,8 +43,38 @@ class BacktestEngine(
     private val config: BacktestConfig = BacktestConfig()
 ) {
 
-    fun run(strategy: Strategy, candles: List<Candle>): BacktestResult {
+    fun run(
+        strategy: Strategy,
+        candles: List<Candle>,
+        onProgress: ((processed: Int, total: Int) -> Unit)? = null
+    ): BacktestResult {
         val sorted = candles.sortedBy { it.timestamp }
+
+        if (sorted.isEmpty()) {
+            val trades = emptyList<BacktestTrade>()
+            val equityCurve = emptyList<EquityPoint>()
+            val finalEquity = config.initialCapital
+            val metrics = computePerformanceMetrics(
+                initialCapital = config.initialCapital,
+                finalEquity = finalEquity,
+                trades = trades,
+                equityCurve = equityCurve
+            )
+
+            return BacktestResult(
+                strategyName = strategy.name,
+                config = config,
+                finalEquity = finalEquity,
+                trades = trades,
+                equityCurve = equityCurve,
+                metrics = metrics
+            )
+        }
+
+        val signalEvaluator = BacktestSignalEvaluator(
+            strategy = strategy,
+            candles = sorted
+        )
 
         val trades = mutableListOf<BacktestTrade>()
         val equityCurve = mutableListOf<EquityPoint>()
@@ -54,8 +84,17 @@ class BacktestEngine(
         var pendingTarget: TradeDirection? = null
         var hasPending = false
 
+        val totalBars = sorted.size
+        var lastReportedProgress = -1
+
         for (i in sorted.indices) {
             val bar = sorted[i]
+
+            val progress = ((i + 1) * 100) / totalBars
+            if (progress != lastReportedProgress) {
+                lastReportedProgress = progress
+                onProgress?.invoke(i + 1, totalBars)
+            }
 
             // Step 1: execute the action queued from the previous bar's
             // signal, at *this* bar's open.
@@ -92,14 +131,14 @@ class BacktestEngine(
             // Step 3: evaluate the strategy on data through this bar (its
             // close) and decide the target position for the *next* bar's
             // open. Not executed here.
-            val window = sorted.subList(0, i + 1)
-            val portfolio = Portfolio(cash = config.initialCapital + realizedPnl)
-            val signalType = strategy.evaluate(StrategyContext(window, portfolio))
-                .firstOrNull()
-                ?.type
-                ?: SignalType.HOLD
+            val signal = signalEvaluator.signalAt(i)
+            val signalType = signal?.type ?: SignalType.HOLD
 
-            pendingTarget = resolveTargetDirection(signalType, openPosition?.direction, strategy.metadata.direction)
+            pendingTarget = resolveTargetDirection(
+                signalType,
+                openPosition?.direction,
+                strategy.metadata.direction
+            )
             hasPending = true
         }
 

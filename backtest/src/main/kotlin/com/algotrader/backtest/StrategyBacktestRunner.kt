@@ -18,7 +18,8 @@ class StrategyBacktestRunner(
     fun run(
         configuration: StrategyConfiguration,
         candles: List<Candle>,
-        backtestConfig: BacktestConfig = BacktestConfig()
+        backtestConfig: BacktestConfig = BacktestConfig(),
+        onProgress: ((processed: Int, total: Int) -> Unit)? = null
     ): BacktestResult {
         require(candles.isNotEmpty()) {
             "candles must not be empty"
@@ -28,18 +29,21 @@ class StrategyBacktestRunner(
 
         return BacktestEngine(backtestConfig).run(
             strategy = strategy,
-            candles = candles
+            candles = candles,
+            onProgress = onProgress
         )
     }
 
     fun run(
         strategyId: String,
         candles: List<Candle>,
-        backtestConfig: BacktestConfig = BacktestConfig()
+        backtestConfig: BacktestConfig = BacktestConfig(),
+        onProgress: ((processed: Int, total: Int) -> Unit)? = null
     ): BacktestResult =
         run(
             configuration = StrategyConfiguration(strategyId),
             candles = candles,
-            backtestConfig = backtestConfig
+            backtestConfig = backtestConfig,
+            onProgress = onProgress
         )
 }

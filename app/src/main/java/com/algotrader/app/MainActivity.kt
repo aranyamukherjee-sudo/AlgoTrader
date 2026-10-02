@@ -120,8 +120,15 @@ class MainActivity : Activity() {
     private lateinit var bottomNav: AltrixaBottomNav
 
     private lateinit var backtestJobStore: BacktestJobStore
+    // The selected/viewed job is separate from the set of jobs
+    // actually running in WorkManager. Multiple jobs can run in parallel.
+    private var selectedBacktestJobId: String? = null
     private var activeBacktestJobId: String? = null
     private var renderedBacktestJobId: String? = null
+
+    // Explicit UI state: Android Back should move from Results
+    // to Backtest configuration before leaving the Backtest tab.
+    private var isBacktestResultsScreen = false
 
     private val backtestProgressHandler = Handler(Looper.getMainLooper())
     private var isBacktestScreenVisible = false
@@ -1231,6 +1238,7 @@ private var isHomeScreenActive = false
         backtestJobStore = BacktestJobStore(applicationContext)
 
         intent.getStringExtra(BacktestWorker.EXTRA_BACKTEST_JOB_ID)?.let {
+            selectedBacktestJobId = it
             activeBacktestJobId = it
         }
 
@@ -1251,6 +1259,7 @@ private var isHomeScreenActive = false
         setIntent(intent)
 
         intent?.getStringExtra(BacktestWorker.EXTRA_BACKTEST_JOB_ID)?.let {
+            selectedBacktestJobId = it
             activeBacktestJobId = it
             showBacktest()
         }
@@ -1262,6 +1271,44 @@ private var isHomeScreenActive = false
             return
         }
 
+        if (isBacktestResultsScreen) {
+            // Results -> Backtest configuration.
+            // Keep all background jobs alive. Only clear the currently
+            // viewed result.
+            isBacktestResultsScreen = false
+            selectedBacktestJobId = null
+            activeBacktestJobId = null
+            renderedBacktestJobId = null
+            isBacktestScreenVisible = true
+            isHomeScreenActive = false
+
+            clearContent()
+            renderBacktestConfiguration()
+
+            backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+            backtestProgressHandler.post(backtestProgressRunnable)
+            return
+        }
+
+        if (isBacktestScreenVisible && activeBacktestJobId != null) {
+            // Running job -> Backtest configuration.
+            // The WorkManager job continues independently in the background.
+            selectedBacktestJobId = null
+            activeBacktestJobId = null
+            renderedBacktestJobId = null
+            isBacktestResultsScreen = false
+            isBacktestScreenVisible = true
+            isHomeScreenActive = false
+
+            clearContent()
+            renderBacktestConfiguration()
+
+            backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+            backtestProgressHandler.post(backtestProgressRunnable)
+            return
+        }
+
+        // Backtest configuration -> Home.
         showHome()
     }
 
@@ -1406,6 +1453,11 @@ private var isHomeScreenActive = false
     private fun showHome() {
         isBacktestScreenVisible = false
         backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+
+        // Home is outside the Backtest sub-flow.
+        isBacktestResultsScreen = false
+        renderedBacktestJobId = null
+
         bottomNav.setSelected(AltrixaDestination.HOME)
         clearContent()
         isHomeScreenActive = true
@@ -2101,6 +2153,334 @@ private var selectedBacktestCapital: Double = 100_000.0
 private var selectedBacktestSizing: PositionSizing = PositionSizing.FixedQuantity(1.0)
 
 
+private fun showBacktest() {
+    bottomNav.setSelected(AltrixaDestination.BACKTEST)
+    clearContent()
+
+    renderedBacktestJobId = null
+    isBacktestScreenVisible = true
+    isBacktestResultsScreen = false
+    isHomeScreenActive = false
+
+    backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+
+    val jobId = activeBacktestJobId
+
+    if (jobId != null) {
+        val job = backtestJobStore.get(jobId)
+
+        if (job != null) {
+            restoreBacktestJob(job)
+
+            if (
+                job.status != BacktestJobStore.Status.COMPLETED &&
+                job.status != BacktestJobStore.Status.FAILED &&
+                job.status != BacktestJobStore.Status.CANCELLED
+            ) {
+                backtestProgressHandler.post(backtestProgressRunnable)
+            }
+
+            return
+        }
+
+        activeBacktestJobId = null
+        selectedBacktestJobId = null
+    }
+
+    renderBacktestConfiguration()
+}
+
+private fun renderBacktestConfiguration() {
+    BacktestScreen.renderConfig(
+        this,
+        content,
+        instrumentName = selectedInstrument.displayName,
+        timeframe = selectedTimeframe,
+        candleCount = candlesByInstrument[
+            "${selectedInstrument.backendSymbol}|$selectedTimeframe"
+        ]?.size ?: 0,
+        initialCapital = 100_000.0,
+        positionQuantity = 1.0,
+        strategies = StrategyFactory().let { factory ->
+            listOf(
+                "moving_average_crossover",
+                "rsi",
+                "macd",
+                "bollinger_bands",
+                "donchian_channel",
+                "donchian_ema",
+                "cpr_ema"
+            ).map { strategyId -> factory.create(strategyId) }
+        }
+    ) { configurations, capital, sizing ->
+        selectedBacktestConfigurations = configurations
+        selectedBacktestCapital = capital
+        selectedBacktestSizing = sizing
+        runBacktest()
+    }
+
+    // Show persisted backtests underneath the configuration screen.
+    // The BacktestJobStore is app-private persistent storage, so this
+    // list survives navigation and app restarts.
+    BacktestScreen.renderSavedTests(
+        this,
+        content,
+        backtestJobStore.list()
+    ) { jobId ->
+        val job = backtestJobStore.get(jobId)
+
+        if (job == null) {
+            android.widget.Toast.makeText(
+                this,
+                "Saved backtest is no longer available.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            return@renderSavedTests
+        }
+
+        activeBacktestJobId = job.id
+        selectedBacktestJobId = job.id
+        restoreBacktestJob(job)
+    }
+}
+
+private fun restoreBacktestJob(job: BacktestJobStore.Job) {
+    selectedBacktestConfigurations = job.strategies
+    selectedBacktestCapital = job.initialCapital
+    selectedBacktestSizing = job.positionSizing
+
+    val strategyFactory = StrategyFactory()
+    val strategies = job.strategies.map {
+        strategyFactory.create(it)
+    }
+
+    when (job.status) {
+        BacktestJobStore.Status.COMPLETED -> {
+            if (renderedBacktestJobId == job.id) {
+                return
+            }
+
+            val results = try {
+                backtestJobStore.getResults(job.id)
+            } catch (e: Exception) {
+                content.removeAllViews()
+
+                val diagnostic = TextView(this).apply {
+                    text = "RESULT RESTORE ERROR\\n\\n" +
+                        "${e.javaClass.simpleName}: ${e.message}\\n\\n" +
+                        backtestJobStore.debugResultsStorage(job.id)
+                    textSize = 14f
+                    setTextColor(AltrixaColors.textPrimary)
+                    setPadding(
+                        dp(16),
+                        dp(24),
+                        dp(16),
+                        dp(24)
+                    )
+                }
+
+                content.addView(
+                    diagnostic,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                )
+
+                return
+            }
+
+            android.util.Log.i(
+                "ALTRIXA_BACKTEST",
+                "RESTORE_TEST job=${job.id} status=${job.status} results=${results.size}"
+            )
+
+            if (results.isNotEmpty()) {
+                renderedBacktestJobId = job.id
+                content.removeAllViews()
+                BacktestScreen.renderResults(
+                    this,
+                    content,
+                    instrumentName = job.instrumentSymbol,
+                    timeframe = selectedTimeframe,
+                    candleCount = job.candleCount,
+                    initialCapital = job.initialCapital,
+                    positionSizing = job.positionSizing,
+                    results = results
+                ) {
+                    activeBacktestJobId = null
+                    renderedBacktestJobId = null
+                    renderBacktestConfiguration()
+                }
+            } else {
+                content.removeAllViews()
+
+                val diagnostic = TextView(this).apply {
+                    text = "RESTORE TEST\\n\\n" +
+                        "Job ID: ${job.id}\\n" +
+                        "Status: ${job.status}\\n" +
+                        "Results loaded: ${results.size}\\n\\n" +
+                        backtestJobStore.debugResultsStorage(job.id)
+                    textSize = 14f
+                    setTextColor(AltrixaColors.textPrimary)
+                    setPadding(
+                        dp(16),
+                        dp(24),
+                        dp(16),
+                        dp(24)
+                    )
+                }
+
+                content.addView(
+                    diagnostic,
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+        }
+
+        BacktestJobStore.Status.FAILED -> {
+            if (renderedBacktestJobId == job.id) {
+                return
+            }
+
+            renderedBacktestJobId = job.id
+            renderBacktestFailure(
+                job.errorMessage ?: "Backtest failed."
+            )
+        }
+
+        BacktestJobStore.Status.CANCELLED -> {
+            if (renderedBacktestJobId == job.id) {
+                return
+            }
+
+            renderedBacktestJobId = job.id
+            renderBacktestFailure(
+                "Backtest was cancelled."
+            )
+        }
+
+        else -> {
+            renderedBacktestJobId = null
+
+            BacktestScreen.renderRunning(
+                this,
+                content,
+                instrumentName = job.instrumentSymbol,
+                timeframe = timeframeLabel(job.timeframe),
+                candleCount = job.candleCount,
+                strategies = strategies
+            )
+
+            content.addView(
+                TextView(this).apply {
+                    text = "Progress: ${job.progress}% · ${job.currentStep}"
+                    textSize = 14f
+                    setTextColor(AltrixaColors.textSecondary)
+                    setPadding(
+                        0,
+                        dp(AltrixaDimens.spaceSm),
+                        0,
+                        dp(AltrixaDimens.spaceSm)
+                    )
+                    tag = "BACKTEST_PROGRESS"
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
+    }
+}
+
+private fun addBacktestProgressView(
+    progress: Int,
+    currentStep: String
+) {
+    content.findViewWithTag<TextView>(
+        "BACKTEST_PROGRESS"
+    )?.let { existing ->
+        content.removeView(existing)
+    }
+
+    content.addView(
+        TextView(this).apply {
+            text = "Progress: ${progress.coerceIn(0, 100)}% · $currentStep"
+            textSize = 14f
+            setTextColor(AltrixaColors.textSecondary)
+            setPadding(
+                0,
+                dp(AltrixaDimens.spaceSm),
+                0,
+                dp(AltrixaDimens.spaceSm)
+            )
+            tag = "BACKTEST_PROGRESS"
+        },
+        LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        )
+    )
+}
+
+private fun refreshBacktestJob(jobId: String) {
+    if (!isBacktestScreenVisible || activeBacktestJobId != jobId) return
+
+    val job = backtestJobStore.get(jobId) ?: return
+
+    when (job.status) {
+        BacktestJobStore.Status.COMPLETED,
+        BacktestJobStore.Status.FAILED,
+        BacktestJobStore.Status.CANCELLED -> {
+            backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+            isBacktestScreenVisible = true
+            restoreBacktestJob(job)
+        }
+
+        else -> {
+            val progressView = content.findViewWithTag<TextView>(
+                "BACKTEST_PROGRESS"
+            )
+
+            progressView?.text =
+                "Progress: ${job.progress}% · ${job.currentStep}"
+        }
+    }
+}
+
+private fun renderBacktestFailure(message: String) {
+    content.removeAllViews()
+
+    BacktestScreen.renderError(
+        this,
+        content,
+        message
+    ) {
+        activeBacktestJobId = null
+        renderedBacktestJobId = null
+        renderBacktestConfiguration()
+    }
+}
+
+private fun timeframeLabel(
+    timeframe: com.algotrader.domain.Timeframe
+): String {
+    return when (timeframe) {
+        com.algotrader.domain.Timeframe.MINUTE_1 -> "1m"
+        com.algotrader.domain.Timeframe.MINUTE_5 -> "5m"
+        com.algotrader.domain.Timeframe.MINUTE_15 -> "15m"
+        com.algotrader.domain.Timeframe.MINUTE_30 -> "30m"
+        com.algotrader.domain.Timeframe.HOUR_1 -> "1h"
+        com.algotrader.domain.Timeframe.HOUR_4 -> "4h"
+        com.algotrader.domain.Timeframe.DAY_1 -> "1D"
+    }
+}
+
+
 private fun runBacktest() {
     val uiCandles = candlesByInstrument[
         "${selectedInstrument.backendSymbol}|$selectedTimeframe"
@@ -2175,26 +2555,81 @@ private fun runBacktest() {
     }
 
     try {
-        val job = backtestJobStore.create(
-            instrument = instrument,
-            timeframe = timeframe,
-            strategies = selectedBacktestConfigurations,
-            initialCapital = selectedBacktestCapital,
-            positionSizing = selectedBacktestSizing,
-            candleCount = domainCandles.size
-        )
+        val workManager = WorkManager.getInstance(applicationContext)
+        val factory = StrategyFactory()
 
-        backtestJobStore.saveCandles(job.id, domainCandles)
-        activeBacktestJobId = job.id
+        /*
+         * One selected strategy = one persisted Job + one WorkManager task.
+         *
+         * This deliberately does NOT create a single multi-strategy job.
+         * Each strategy therefore has its own:
+         * - Job ID
+         * - persisted progress/checkpoint
+         * - result
+         * - WorkManager work ID
+         * - unique WorkManager name
+         */
+        val jobs = selectedBacktestConfigurations.map { configuration ->
+            val job = backtestJobStore.create(
+                instrument = instrument,
+                timeframe = timeframe,
+                strategies = listOf(configuration),
+                initialCapital = selectedBacktestCapital,
+                positionSizing = selectedBacktestSizing,
+                candleCount = domainCandles.size
+            )
+
+            backtestJobStore.saveCandles(job.id, domainCandles)
+
+            val request = OneTimeWorkRequestBuilder<BacktestWorker>()
+                .setInputData(
+                    workDataOf(
+                        BacktestWorker.KEY_JOB_ID to job.id
+                    )
+                )
+                .setExpedited(
+                    androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST
+                )
+                .addTag("altrixa_backtest")
+                .addTag("altrixa_backtest_${job.id}")
+                .build()
+
+            workManager.enqueueUniqueWork(
+                "altrixa_backtest_${job.id}",
+                ExistingWorkPolicy.REPLACE,
+                request
+            )
+
+            android.util.Log.d(
+                "ALTRIXA_BACKTEST",
+                "Queued independent backtest: " +
+                    "job=${job.id}, strategy=${configuration.strategyId}, " +
+                    "workId=${request.id}"
+            )
+
+            job
+        }
+
+        if (jobs.isEmpty()) {
+            throw IllegalStateException("No backtest jobs were created")
+        }
+
+        /*
+         * Keep the first created job as the foreground/viewed job.
+         * The Active Backtests renderer obtains the complete job list
+         * from BacktestJobStore, so all independent jobs remain visible.
+         */
+        val firstJob = jobs.first()
+        selectedBacktestJobId = firstJob.id
+        activeBacktestJobId = firstJob.id
         renderedBacktestJobId = null
+        isBacktestResultsScreen = false
         isBacktestScreenVisible = true
         backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
 
         content.removeAllViews()
 
-        val strategies = selectedBacktestConfigurations.map {
-            StrategyFactory().create(it)
-        }
+        val firstStrategy = factory.create(firstJob.strategies.first())
 
         BacktestScreen.renderRunning(
             this,
@@ -2202,268 +2637,43 @@ private fun runBacktest() {
             instrumentName = selectedInstrument.displayName,
             timeframe = selectedTimeframe,
             candleCount = domainCandles.size,
-            strategies = strategies
+            strategies = listOf(firstStrategy)
         )
 
-        val request = OneTimeWorkRequestBuilder<BacktestWorker>()
-            .setInputData(
-                workDataOf(
-                    BacktestWorker.KEY_JOB_ID to job.id
-                )
-            )
-            .addTag("altrixa_backtest")
-            .addTag("altrixa_backtest_${job.id}")
-            .build()
-
-        WorkManager.getInstance(applicationContext).enqueueUniqueWork(
-            "altrixa_backtest_${job.id}",
-            ExistingWorkPolicy.REPLACE,
-            request
+        addBacktestProgressView(
+            progress = 0,
+            currentStep = if (jobs.size == 1) {
+                "Queued"
+            } else {
+                "Queued ${jobs.size} independent backtests"
+            }
         )
+
+        /*
+         * WorkManager owns execution independently of the Activity.
+         * The persisted BacktestJobStore state is refreshed by
+         * backtestProgressRunnable, so no blocking WorkManager query
+         * is needed on the Activity/UI thread.
+         */
 
         backtestProgressHandler.post(backtestProgressRunnable)
 
+
     } catch (e: Exception) {
-        content.removeAllViews()
-        BacktestScreen.renderError(
+        android.util.Log.e(
+            "ALTRIXA_BACKTEST",
+            "Unable to start backtest jobs",
+            e
+        )
+
+        Toast.makeText(
             this,
-            content,
-            e.message ?: "Unable to start backtest"
-        ) {
-            runBacktest()
-        }
+            "Unable to start backtest: ${e.message ?: e.javaClass.simpleName}",
+            Toast.LENGTH_LONG
+        ).show()
     }
 }
 
-private fun renderBacktestResults(
-    results: List<BacktestResult>,
-    candleCount: Int
-) {
-    content.removeAllViews()
-
-    BacktestScreen.renderResults(
-        this,
-        content,
-        instrumentName = selectedInstrument.displayName,
-        timeframe = selectedTimeframe,
-        candleCount = candleCount,
-        initialCapital = selectedBacktestCapital,
-        positionSizing = selectedBacktestSizing,
-        results = results
-    ) {
-        runBacktest()
-    }
-}
-
-private fun showBacktest() {
-    bottomNav.setSelected(AltrixaDestination.BACKTEST)
-    clearContent()
-
-    isBacktestScreenVisible = true
-    backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
-
-    val jobId = activeBacktestJobId
-    if (jobId != null) {
-        val job = backtestJobStore.get(jobId)
-
-        if (job != null) {
-            restoreBacktestJob(job)
-
-            if (job.status != BacktestJobStore.Status.COMPLETED &&
-                job.status != BacktestJobStore.Status.FAILED &&
-                job.status != BacktestJobStore.Status.CANCELLED
-            ) {
-                backtestProgressHandler.post(backtestProgressRunnable)
-            }
-
-            return
-        }
-
-        activeBacktestJobId = null
-    }
-
-    renderBacktestConfiguration()
-}
-
-private fun renderBacktestConfiguration() {
-    BacktestScreen.renderConfig(
-        this,
-        content,
-        instrumentName = selectedInstrument.displayName,
-        timeframe = selectedTimeframe,
-        candleCount = candlesByInstrument[
-            "${selectedInstrument.backendSymbol}|$selectedTimeframe"
-        ]?.size ?: 0,
-        initialCapital = 100_000.0,
-        positionQuantity = 1.0,
-        strategies = StrategyFactory().let { factory ->
-            listOf(
-                "moving_average_crossover",
-                "rsi",
-                "macd",
-                "bollinger_bands",
-                "donchian_channel",
-                "donchian_ema",
-                "cpr_ema"
-            ).map { strategyId -> factory.create(strategyId) }
-        }
-    ) { configurations, capital, sizing ->
-        selectedBacktestConfigurations = configurations
-        selectedBacktestCapital = capital
-        selectedBacktestSizing = sizing
-        runBacktest()
-    }
-}
-
-private fun restoreBacktestJob(job: BacktestJobStore.Job) {
-    selectedBacktestConfigurations = job.strategies
-    selectedBacktestCapital = job.initialCapital
-    selectedBacktestSizing = job.positionSizing
-
-    val strategyFactory = StrategyFactory()
-    val strategies = job.strategies.map {
-        strategyFactory.create(it)
-    }
-
-    when (job.status) {
-        BacktestJobStore.Status.COMPLETED -> {
-            if (renderedBacktestJobId == job.id) {
-                return
-            }
-
-            val results = backtestJobStore.getResults(job.id)
-
-            if (results.isNotEmpty()) {
-                renderedBacktestJobId = job.id
-                BacktestScreen.renderResults(
-                    this,
-                    content,
-                    instrumentName = job.instrumentSymbol,
-                    timeframe = selectedTimeframe,
-                    candleCount = job.candleCount,
-                    initialCapital = job.initialCapital,
-                    positionSizing = job.positionSizing,
-                    results = results
-                ) {
-                    activeBacktestJobId = null
-                    renderedBacktestJobId = null
-                    renderBacktestConfiguration()
-                }
-            } else {
-                renderBacktestFailure(
-                    "Backtest completed, but its saved results could not be restored."
-                )
-            }
-        }
-
-        BacktestJobStore.Status.FAILED -> {
-            if (renderedBacktestJobId == job.id) {
-                return
-            }
-
-            renderedBacktestJobId = job.id
-            renderBacktestFailure(
-                job.errorMessage ?: "Backtest failed."
-            )
-        }
-
-        BacktestJobStore.Status.CANCELLED -> {
-            if (renderedBacktestJobId == job.id) {
-                return
-            }
-
-            renderedBacktestJobId = job.id
-            renderBacktestFailure(
-                "Backtest was cancelled."
-            )
-        }
-
-        else -> {
-            renderedBacktestJobId = null
-
-            BacktestScreen.renderRunning(
-                this,
-                content,
-                instrumentName = job.instrumentSymbol,
-                timeframe = timeframeLabel(job.timeframe),
-                candleCount = job.candleCount,
-                strategies = strategies
-            )
-
-            content.addView(
-                TextView(this).apply {
-                    text = "Progress: ${job.progress}% · ${job.currentStep}"
-                    textSize = 14f
-                    setTextColor(AltrixaColors.textSecondary)
-                    setPadding(
-                        0,
-                        dp(AltrixaDimens.spaceSm),
-                        0,
-                        dp(AltrixaDimens.spaceSm)
-                    )
-                    tag = "BACKTEST_PROGRESS"
-                },
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
-            )
-        }
-    }
-}
-
-private fun refreshBacktestJob(jobId: String) {
-    if (!isBacktestScreenVisible || activeBacktestJobId != jobId) return
-
-    val job = backtestJobStore.get(jobId) ?: return
-
-    when (job.status) {
-        BacktestJobStore.Status.COMPLETED,
-        BacktestJobStore.Status.FAILED,
-        BacktestJobStore.Status.CANCELLED -> {
-            backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
-            isBacktestScreenVisible = true
-            restoreBacktestJob(job)
-        }
-
-        else -> {
-            val progressView = content.findViewWithTag<TextView>(
-                "BACKTEST_PROGRESS"
-            )
-
-            progressView?.text =
-                "Progress: ${job.progress}% · ${job.currentStep}"
-        }
-    }
-}
-
-private fun renderBacktestFailure(message: String) {
-    content.removeAllViews()
-
-    BacktestScreen.renderError(
-        this,
-        content,
-        message
-    ) {
-        activeBacktestJobId = null
-        renderedBacktestJobId = null
-        renderBacktestConfiguration()
-    }
-}
-
-private fun timeframeLabel(
-    timeframe: com.algotrader.domain.Timeframe
-): String {
-    return when (timeframe) {
-        com.algotrader.domain.Timeframe.MINUTE_1 -> "1m"
-        com.algotrader.domain.Timeframe.MINUTE_5 -> "5m"
-        com.algotrader.domain.Timeframe.MINUTE_15 -> "15m"
-        com.algotrader.domain.Timeframe.MINUTE_30 -> "30m"
-        com.algotrader.domain.Timeframe.HOUR_1 -> "1h"
-        com.algotrader.domain.Timeframe.HOUR_4 -> "4h"
-        com.algotrader.domain.Timeframe.DAY_1 -> "1D"
-    }
-}
 }
 
 // Indicator math — computed locally from real candle closes, never fetched.
@@ -2537,6 +2747,7 @@ private val EMA20_COLOR = 0xFF29B6F6.toInt()
 private val EMA50_COLOR = 0xFFFFA726.toInt()
 private val PRICE_LINE_COLOR = 0xFF4DD0E1.toInt()
 private val AXIS_TEXT_COLOR = 0xFF8B93A1.toInt()
+
 
 class TradingChartView(context: android.content.Context) : View(context) {
 

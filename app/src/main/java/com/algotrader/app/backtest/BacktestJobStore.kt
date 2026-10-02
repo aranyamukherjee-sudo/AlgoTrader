@@ -1,4 +1,6 @@
 package com.algotrader.app.backtest
+
+import java.io.File
 import com.algotrader.backtest.BacktestConfig
 
 import android.content.Context
@@ -23,6 +25,17 @@ import java.util.UUID
  * The Activity creates jobs, while WorkManager owns their execution.
  * No Activity/View references are stored here.
  */
+private const val CHECKPOINTS_KEY = "backtest_checkpoints"
+private const val RESULTS_KEY = "__results__"
+private const val CANDLES_KEY = "__candles__"
+
+/*
+ * Activity and WorkManager each create their own BacktestJobStore instance.
+ * @Synchronized only locks one instance, so root read/modify/write operations
+ * could previously race between those two instances.
+ */
+private val BACKTEST_STORAGE_LOCK = Any()
+
 class BacktestJobStore(context: Context) {
 
     enum class Status {
@@ -35,6 +48,11 @@ class BacktestJobStore(context: Context) {
         FAILED,
         CANCELLED
     }
+
+    data class Checkpoint(
+        val startedAtMillis: Long,
+        val results: List<BacktestResult>
+    )
 
     data class Job(
         val id: String,
@@ -55,7 +73,15 @@ class BacktestJobStore(context: Context) {
         val errorMessage: String? = null
     )
 
-    private val file = context.applicationContext.getFileStreamPath(FILE_NAME)
+    private val appContext = context.applicationContext
+    private val file = appContext.getFileStreamPath(FILE_NAME)
+    private val storageDir = file.parentFile ?: appContext.filesDir
+
+    init {
+        synchronized(BACKTEST_STORAGE_LOCK) {
+            migrateLegacyStorageIfNeeded()
+        }
+    }
 
     @Synchronized
     fun create(
@@ -130,6 +156,27 @@ class BacktestJobStore(context: Context) {
     }
 
     @Synchronized
+    fun clearCheckpointAndComplete(jobId: String): Job? {
+        val existing = get(jobId) ?: return null
+        val now = Instant.now()
+
+        deleteStorageFile(checkpointFile(jobId))
+
+        val updated = existing.copy(
+            status = Status.COMPLETED,
+            progress = 100,
+            currentStep = "Complete",
+            updatedAt = now,
+            completedAt = now,
+            errorMessage = null
+        )
+
+        writeJob(updated)
+        return updated
+    }
+
+
+    @Synchronized
     fun fail(jobId: String, message: String): Job? {
         return update(
             jobId = jobId,
@@ -164,8 +211,6 @@ class BacktestJobStore(context: Context) {
         val jobs = mutableListOf<Job>()
 
         root.keys().forEach { key ->
-            if (key == RESULTS_KEY || key == CANDLES_KEY) return@forEach
-
             root.optJSONObject(key)?.let { json ->
                 runCatching { jobFromJson(json) }
                     .getOrNull()
@@ -177,34 +222,301 @@ class BacktestJobStore(context: Context) {
     }
 
     @Synchronized
+    fun saveCheckpoint(
+        jobId: String,
+        startedAtMillis: Long,
+        results: List<BacktestResult>
+    ) {
+        val checkpoint = JSONObject().apply {
+            put("startedAtMillis", startedAtMillis)
+
+            val resultsArray = JSONArray()
+            results.forEach { resultsArray.put(resultToJson(it)) }
+            put("results", resultsArray)
+        }
+
+        writeJsonFile(checkpointFile(jobId), checkpoint)
+    }
+
+    @Synchronized
+    fun getCheckpoint(jobId: String): Checkpoint? {
+        val checkpoint = readJsonFile(checkpointFile(jobId)) ?: return null
+
+        val resultsArray = checkpoint.optJSONArray("results") ?: JSONArray()
+
+        val results = buildList {
+            for (index in 0 until resultsArray.length()) {
+                runCatching {
+                    add(resultFromJson(resultsArray.getJSONObject(index)))
+                }
+            }
+        }
+
+        return Checkpoint(
+            startedAtMillis = checkpoint.optLong(
+                "startedAtMillis",
+                System.currentTimeMillis()
+            ),
+            results = results
+        )
+    }
+
+    @Synchronized
+    fun clearCheckpoint(jobId: String) {
+        deleteStorageFile(checkpointFile(jobId))
+    }
+
+    @Synchronized
     fun saveResults(jobId: String, results: List<BacktestResult>) {
-        val root = readRoot()
+        synchronized(BACKTEST_STORAGE_LOCK) {
+            require(results.isNotEmpty()) {
+                "Cannot save empty backtest results"
+            }
 
-        val resultsRoot = root.optJSONObject(RESULTS_KEY)
-            ?: JSONObject().also { root.put(RESULTS_KEY, it) }
+            val array = JSONArray()
+            results.forEach { array.put(resultToJson(it)) }
 
-        val array = JSONArray()
-        results.forEach { array.put(resultToJson(it)) }
+            /*
+             * Keep the dedicated result file for normal operation.
+             * Also persist the result array inside the main job store so a
+             * completed job can always restore its results from the same
+             * persistent record as its metadata.
+             *
+             * The shared storage lock covers the entire transaction because
+             * Activity and Worker use different BacktestJobStore instances.
+             */
+            writeJsonFile(resultsFile(jobId), array)
 
-        resultsRoot.put(jobId, array)
-        writeRoot(root)
+            val root = readRoot()
+            val resultsRoot = root.optJSONObject(RESULTS_KEY) ?: JSONObject()
+            resultsRoot.put(jobId, array)
+            root.put(RESULTS_KEY, resultsRoot)
+            writeRoot(root)
+
+            val dedicatedFile = resultsFile(jobId)
+            if (!dedicatedFile.exists() || dedicatedFile.length() == 0L) {
+                throw IllegalStateException(
+                    "Backtest results were not persisted: ${dedicatedFile.absolutePath}"
+                )
+            }
+
+            val persistedRoot = readRoot()
+                .optJSONObject(RESULTS_KEY)
+                ?.optJSONArray(jobId)
+
+            if (persistedRoot == null || persistedRoot.length() == 0) {
+                throw IllegalStateException(
+                    "Backtest results were not persisted in the job store: $jobId"
+                )
+            }
+        }
+    }
+
+    fun debugResultsStorage(jobId: String): String {
+        val target = resultsFile(jobId)
+        return "path=${target.absolutePath}, exists=${target.exists()}, size=${if (target.exists()) target.length() else 0L}"
     }
 
     @Synchronized
     fun getResults(jobId: String): List<BacktestResult> {
-        if (!file.exists()) return emptyList()
-
-        val array = readRoot()
+        val dedicated = readJsonArrayFile(resultsFile(jobId))
+        val array = dedicated ?: readRoot()
             .optJSONObject(RESULTS_KEY)
             ?.optJSONArray(jobId)
             ?: return emptyList()
 
         return buildList {
             for (index in 0 until array.length()) {
-                runCatching {
+                try {
                     add(resultFromJson(array.getJSONObject(index)))
+                } catch (e: Exception) {
+                    throw IllegalStateException(
+                        "Saved result $index could not be restored: ${e.javaClass.simpleName}: ${e.message}",
+                        e
+                    )
                 }
             }
+        }
+    }
+
+    private fun strategiesToJson(
+        strategies: List<StrategyConfiguration>
+    ): JSONArray {
+        return JSONArray().apply {
+            strategies.forEach { strategy ->
+                put(
+                    JSONObject().apply {
+                        put("strategyId", strategy.strategyId)
+
+                        val parameters = JSONObject()
+                        strategy.parameters.forEach { (key, value) ->
+                            parameters.put(key, value)
+                        }
+
+                        put("parameters", parameters)
+                    }
+                )
+            }
+        }
+    }
+
+    private fun strategiesFromJson(
+        array: JSONArray
+    ): List<StrategyConfiguration> {
+        return buildList {
+            for (index in 0 until array.length()) {
+                val json = array.getJSONObject(index)
+                val parametersJson = json.optJSONObject("parameters")
+                val parameters = mutableMapOf<String, Double>()
+
+                parametersJson?.keys()?.forEach { key ->
+                    parameters[key] = parametersJson.getDouble(key)
+                }
+
+                add(
+                    StrategyConfiguration(
+                        strategyId = json.getString("strategyId"),
+                        parameters = parameters
+                    )
+                )
+            }
+        }
+    }
+
+    private fun positionSizingToJson(
+        sizing: PositionSizing
+    ): JSONObject {
+        return when (sizing) {
+            is PositionSizing.FixedQuantity -> JSONObject().apply {
+                put("type", "fixed_quantity")
+                put("quantity", sizing.quantity)
+            }
+
+            is PositionSizing.PercentOfEquity -> JSONObject().apply {
+                put("type", "percent_of_equity")
+                put("percent", sizing.percent)
+            }
+        }
+    }
+
+    private fun positionSizingFromJson(
+        json: JSONObject
+    ): PositionSizing {
+        return when (json.getString("type")) {
+            "fixed_quantity" -> PositionSizing.FixedQuantity(
+                json.getDouble("quantity")
+            )
+
+            "percent_of_equity" -> PositionSizing.PercentOfEquity(
+                json.getDouble("percent")
+            )
+
+            else -> error(
+                "Unknown position sizing type: ${json.getString("type")}"
+            )
+        }
+    }
+
+    private fun resultToJson(result: BacktestResult): JSONObject {
+        return JSONObject().apply {
+            put("strategyName", result.strategyName)
+            put("finalEquity", result.finalEquity)
+
+            put(
+                "config",
+                JSONObject().apply {
+                    put("initialCapital", result.config.initialCapital)
+                    put(
+                        "positionSizing",
+                        positionSizingToJson(result.config.positionSizing)
+                    )
+                }
+            )
+
+            put(
+                "trades",
+                JSONArray().apply {
+                    result.trades.forEach { trade ->
+                        put(
+                            JSONObject().apply {
+                                put("direction", trade.direction.name)
+                                put("entryIndex", trade.entryIndex)
+                                put(
+                                    "entryTimestamp",
+                                    trade.entryTimestamp.toString()
+                                )
+                                put("entryPrice", trade.entryPrice)
+                                put("exitIndex", trade.exitIndex)
+                                put(
+                                    "exitTimestamp",
+                                    trade.exitTimestamp.toString()
+                                )
+                                put("exitPrice", trade.exitPrice)
+                                put("quantity", trade.quantity)
+                                put("grossPnl", trade.grossPnl)
+                                put("returnPercent", trade.returnPercent)
+                                put(
+                                    "holdingPeriodBars",
+                                    trade.holdingPeriodBars
+                                )
+                                put("isWin", trade.isWin)
+                            }
+                        )
+                    }
+                }
+            )
+
+            put(
+                "equityCurve",
+                JSONArray().apply {
+                    persistedEquityCurve(result.equityCurve)
+                        .forEach { point ->
+                            put(
+                                JSONObject().apply {
+                                    put("index", point.index)
+                                    put(
+                                        "timestamp",
+                                        point.timestamp.toString()
+                                    )
+                                    put("equity", point.equity)
+                                }
+                            )
+                        }
+                }
+            )
+
+            put(
+                "metrics",
+                JSONObject().apply {
+                    put("totalTrades", result.metrics.totalTrades)
+                    put("winningTrades", result.metrics.winningTrades)
+                    put("losingTrades", result.metrics.losingTrades)
+                    put("winRate", result.metrics.winRate)
+                    put("grossProfit", result.metrics.grossProfit)
+                    put("grossLoss", result.metrics.grossLoss)
+                    put("netProfit", result.metrics.netProfit)
+                    put(
+                        "totalReturnPercent",
+                        result.metrics.totalReturnPercent
+                    )
+                    put("maxDrawdown", result.metrics.maxDrawdown)
+                    put(
+                        "maxDrawdownPercent",
+                        result.metrics.maxDrawdownPercent
+                    )
+                    put("averageTradePnl", result.metrics.averageTradePnl)
+
+                    result.metrics.profitFactor?.let {
+                        put("profitFactor", it)
+                    }
+                    result.metrics.averageWinningTrade?.let {
+                        put("averageWinningTrade", it)
+                    }
+                    result.metrics.averageLosingTrade?.let {
+                        put("averageLosingTrade", it)
+                    }
+                }
+            )
         }
     }
 
@@ -297,11 +609,6 @@ class BacktestJobStore(context: Context) {
 
     @Synchronized
     fun saveCandles(jobId: String, candles: List<Candle>) {
-        val root = readRoot()
-
-        val candlesRoot = root.optJSONObject(CANDLES_KEY)
-            ?: JSONObject().also { root.put(CANDLES_KEY, it) }
-
         val array = JSONArray()
 
         candles.forEach { candle ->
@@ -321,18 +628,12 @@ class BacktestJobStore(context: Context) {
             )
         }
 
-        candlesRoot.put(jobId, array)
-        writeRoot(root)
+        writeJsonFile(candlesFile(jobId), array)
     }
 
     @Synchronized
     fun getCandles(jobId: String): List<Candle> {
-        if (!file.exists()) return emptyList()
-
-        val array = readRoot()
-            .optJSONObject(CANDLES_KEY)
-            ?.optJSONArray(jobId)
-            ?: return emptyList()
+        val array = readJsonArrayFile(candlesFile(jobId)) ?: return emptyList()
 
         return buildList {
             for (index in 0 until array.length()) {
@@ -359,9 +660,11 @@ class BacktestJobStore(context: Context) {
     }
 
     private fun writeJob(job: Job) {
-        val root = readRoot()
-        root.put(job.id, jobToJson(job))
-        writeRoot(root)
+        synchronized(BACKTEST_STORAGE_LOCK) {
+            val root = readRoot()
+            root.put(job.id, jobToJson(job))
+            writeRoot(root)
+        }
     }
 
     private fun jobToJson(job: Job): JSONObject {
@@ -411,164 +714,109 @@ class BacktestJobStore(context: Context) {
         )
     }
 
-    private fun strategiesToJson(
-        strategies: List<StrategyConfiguration>
-    ): JSONArray {
-        return JSONArray().apply {
-            strategies.forEach { strategy ->
-                put(
-                    JSONObject().apply {
-                        put("strategyId", strategy.strategyId)
+    private fun resultsFile(jobId: String): File =
+        File(storageDir, "${jobId}_results.json")
 
-                        val parameters = JSONObject()
-                        strategy.parameters.forEach { (key, value) ->
-                            parameters.put(key, value)
-                        }
+    private fun candlesFile(jobId: String): File =
+        File(storageDir, "${jobId}_candles.json")
 
-                        put("parameters", parameters)
-                    }
-                )
+    private fun checkpointFile(jobId: String): File =
+        File(storageDir, "${jobId}_checkpoint.json")
+
+    private fun readJsonFile(target: File): JSONObject? {
+        if (!target.exists()) return null
+
+        return runCatching {
+            JSONObject(
+                target.inputStream().bufferedReader().use { it.readText() }
+            )
+        }.getOrNull()
+    }
+
+    private fun readJsonArrayFile(target: File): JSONArray? {
+        if (!target.exists()) return null
+
+        return runCatching {
+            JSONArray(
+                target.inputStream().bufferedReader().use { it.readText() }
+            )
+        }.getOrNull()
+    }
+
+    private fun writeJsonFile(target: File, json: Any) {
+        val tempFile = File(target.parentFile, "${target.name}.tmp")
+        val text = json.toString()
+
+        tempFile.outputStream().bufferedWriter().use {
+            it.write(text)
+        }
+
+        if (!tempFile.renameTo(target)) {
+            tempFile.delete()
+            target.outputStream().bufferedWriter().use {
+                it.write(text)
             }
         }
     }
 
-    private fun strategiesFromJson(
-        array: JSONArray
-    ): List<StrategyConfiguration> {
-        return buildList {
-            for (index in 0 until array.length()) {
-                val json = array.getJSONObject(index)
-                val parametersJson = json.optJSONObject("parameters")
-                val parameters = mutableMapOf<String, Double>()
+    private fun deleteStorageFile(target: File) {
+        if (target.exists()) {
+            target.delete()
+        }
 
-                parametersJson?.keys()?.forEach { key ->
-                    parameters[key] = parametersJson.getDouble(key)
-                }
-
-                add(
-                    StrategyConfiguration(
-                        strategyId = json.getString("strategyId"),
-                        parameters = parameters
-                    )
-                )
-            }
+        val temp = File(target.parentFile, "${target.name}.tmp")
+        if (temp.exists()) {
+            temp.delete()
         }
     }
 
-    private fun positionSizingToJson(
-        sizing: PositionSizing
-    ): JSONObject {
-        return when (sizing) {
-            is PositionSizing.FixedQuantity -> JSONObject().apply {
-                put("type", "fixed_quantity")
-                put("quantity", sizing.quantity)
+    private fun migrateLegacyStorageIfNeeded() {
+        val marker = File(storageDir, LEGACY_MIGRATION_MARKER)
+        if (marker.exists()) return
+        if (!file.exists()) {
+            marker.createNewFile()
+            return
+        }
+
+        val legacy = runCatching {
+            JSONObject(
+                file.inputStream().bufferedReader().use { it.readText() }
+            )
+        }.getOrNull() ?: return
+
+        /*
+         * Existing job metadata stays in backtest_jobs.json.
+         * Large legacy payloads are extracted into their own files once.
+         */
+        legacy.optJSONObject(RESULTS_KEY)?.let { resultsRoot ->
+            resultsRoot.keys().forEach { jobId ->
+                resultsRoot.optJSONArray(jobId)?.let {
+                    writeJsonFile(resultsFile(jobId), it)
+                }
             }
+            legacy.remove(RESULTS_KEY)
+        }
 
-            is PositionSizing.PercentOfEquity -> JSONObject().apply {
-                put("type", "percent_of_equity")
-                put("percent", sizing.percent)
+        legacy.optJSONObject(CANDLES_KEY)?.let { candlesRoot ->
+            candlesRoot.keys().forEach { jobId ->
+                candlesRoot.optJSONArray(jobId)?.let {
+                    writeJsonFile(candlesFile(jobId), it)
+                }
             }
+            legacy.remove(CANDLES_KEY)
         }
-    }
 
-    private fun positionSizingFromJson(
-        json: JSONObject
-    ): PositionSizing {
-        return when (json.getString("type")) {
-            "fixed_quantity" -> PositionSizing.FixedQuantity(
-                json.getDouble("quantity")
-            )
-
-            "percent_of_equity" -> PositionSizing.PercentOfEquity(
-                json.getDouble("percent")
-            )
-
-            else -> error("Unknown position sizing type: ${json.getString("type")}")
+        legacy.optJSONObject(CHECKPOINTS_KEY)?.let { checkpointsRoot ->
+            checkpointsRoot.keys().forEach { jobId ->
+                checkpointsRoot.optJSONObject(jobId)?.let {
+                    writeJsonFile(checkpointFile(jobId), it)
+                }
+            }
+            legacy.remove(CHECKPOINTS_KEY)
         }
-    }
 
-    private fun resultToJson(result: BacktestResult): JSONObject {
-        return JSONObject().apply {
-            put("strategyName", result.strategyName)
-            put("finalEquity", result.finalEquity)
-
-            put(
-                "config",
-                JSONObject().apply {
-                    put("initialCapital", result.config.initialCapital)
-                    put(
-                        "positionSizing",
-                        positionSizingToJson(result.config.positionSizing)
-                    )
-                }
-            )
-
-            put(
-                "trades",
-                JSONArray().apply {
-                    result.trades.forEach { trade ->
-                        put(
-                            JSONObject().apply {
-                                put("direction", trade.direction.name)
-                                put("entryIndex", trade.entryIndex)
-                                put("entryTimestamp", trade.entryTimestamp.toString())
-                                put("entryPrice", trade.entryPrice)
-                                put("exitIndex", trade.exitIndex)
-                                put("exitTimestamp", trade.exitTimestamp.toString())
-                                put("exitPrice", trade.exitPrice)
-                                put("quantity", trade.quantity)
-                                put("grossPnl", trade.grossPnl)
-                                put("returnPercent", trade.returnPercent)
-                                put("holdingPeriodBars", trade.holdingPeriodBars)
-                                put("isWin", trade.isWin)
-                            }
-                        )
-                    }
-                }
-            )
-
-            put(
-                "equityCurve",
-                JSONArray().apply {
-                    result.equityCurve.forEach { point ->
-                        put(
-                            JSONObject().apply {
-                                put("index", point.index)
-                                put("timestamp", point.timestamp.toString())
-                                put("equity", point.equity)
-                            }
-                        )
-                    }
-                }
-            )
-
-            put(
-                "metrics",
-                JSONObject().apply {
-                    put("totalTrades", result.metrics.totalTrades)
-                    put("winningTrades", result.metrics.winningTrades)
-                    put("losingTrades", result.metrics.losingTrades)
-                    put("winRate", result.metrics.winRate)
-                    put("grossProfit", result.metrics.grossProfit)
-                    put("grossLoss", result.metrics.grossLoss)
-                    put("netProfit", result.metrics.netProfit)
-                    put("totalReturnPercent", result.metrics.totalReturnPercent)
-                    put("maxDrawdown", result.metrics.maxDrawdown)
-                    put("maxDrawdownPercent", result.metrics.maxDrawdownPercent)
-                    put("averageTradePnl", result.metrics.averageTradePnl)
-
-                    result.metrics.profitFactor?.let {
-                        put("profitFactor", it)
-                    }
-                    result.metrics.averageWinningTrade?.let {
-                        put("averageWinningTrade", it)
-                    }
-                    result.metrics.averageLosingTrade?.let {
-                        put("averageLosingTrade", it)
-                    }
-                }
-            )
-        }
+        writeRoot(legacy)
+        marker.createNewFile()
     }
 
     private fun readRoot(): JSONObject {
@@ -584,14 +832,55 @@ class BacktestJobStore(context: Context) {
     }
 
     private fun writeRoot(root: JSONObject) {
-        file.outputStream().bufferedWriter().use {
-            it.write(root.toString())
+        val tempFile = File(file.parentFile, "${file.name}.tmp")
+        val json = root.toString()
+
+        tempFile.outputStream().bufferedWriter().use {
+            it.write(json)
         }
+
+        if (!tempFile.renameTo(file)) {
+            tempFile.delete()
+            file.outputStream().bufferedWriter().use {
+                it.write(json)
+            }
+        }
+    }
+
+    private fun persistedEquityCurve(
+        curve: List<com.algotrader.backtest.EquityPoint>
+    ): List<com.algotrader.backtest.EquityPoint> {
+        if (curve.size <= MAX_PERSISTED_EQUITY_POINTS) {
+            return curve
+        }
+
+        val lastIndex = curve.lastIndex
+        val result = ArrayList<com.algotrader.backtest.EquityPoint>(
+            MAX_PERSISTED_EQUITY_POINTS
+        )
+
+        for (i in 0 until MAX_PERSISTED_EQUITY_POINTS) {
+            val sourceIndex =
+                ((i.toLong() * lastIndex) /
+                    (MAX_PERSISTED_EQUITY_POINTS - 1))
+                    .toInt()
+
+            result += curve[sourceIndex]
+        }
+
+        return result
     }
 
     companion object {
         private const val FILE_NAME = "backtest_jobs.json"
-        private const val RESULTS_KEY = "__results__"
-        private const val CANDLES_KEY = "__candles__"
+        private const val LEGACY_MIGRATION_MARKER =
+            "backtest_storage_migration_v1.done"
+
+        /*
+         * Full-resolution equity is still used by BacktestEngine and
+         * PerformanceMetrics. Persistence is capped so large intraday
+         * backtests do not create an unnecessarily huge result file.
+         */
+        private const val MAX_PERSISTED_EQUITY_POINTS = 2_000
     }
 }

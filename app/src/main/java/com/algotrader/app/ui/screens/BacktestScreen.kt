@@ -30,6 +30,7 @@ import com.algotrader.app.ui.components.altrixaSectionHeader
 import com.algotrader.app.ui.components.altrixaStatusBadge
 import com.algotrader.app.ui.components.altrixaTitle
 import com.algotrader.backtest.BacktestResult
+import com.algotrader.app.backtest.BacktestJobStore
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.backtest.BacktestTrade
 import com.algotrader.backtest.EquityPoint
@@ -175,6 +176,96 @@ object BacktestScreen {
             altrixaLoadingState(context, "Testing ${strategies.joinToString(", ") { it.name }}\u2026"),
             matchWidth(context, topMargin = AltrixaDimens.spaceSm)
         )
+        container.addView(card, topGap(context))
+    }
+
+    // -----------------------------------------------------------------
+    // Active backtests
+    // -----------------------------------------------------------------
+
+    fun renderActiveBacktests(
+        context: Context,
+        container: LinearLayout,
+        jobs: List<BacktestJobStore.Job>,
+        selectedJobId: String?,
+        onSelectJob: (String) -> Unit
+    ) {
+        val activeJobs = jobs.filter {
+            it.status != BacktestJobStore.Status.COMPLETED &&
+                it.status != BacktestJobStore.Status.FAILED &&
+                it.status != BacktestJobStore.Status.CANCELLED
+        }
+
+        if (activeJobs.isEmpty()) return
+
+        container.addView(altrixaSectionHeader(context, "Active Backtests"))
+
+        val card = altrixaCard(context).apply {
+            tag = "BACKTEST_ACTIVE_JOBS"
+        }
+
+        activeJobs.forEachIndexed { index, job ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(
+                    context.dpToPx(10),
+                    context.dpToPx(9),
+                    context.dpToPx(10),
+                    context.dpToPx(9)
+                )
+
+                setOnClickListener {
+                    onSelectJob(job.id)
+                }
+            }
+
+            val strategyNames = job.strategies.joinToString(", ") { configuration ->
+                configuration.strategyId
+            }
+
+            val title = altrixaLabel(
+                context,
+                "${job.instrumentSymbol} · ${timeframeLabel(job.timeframe)}"
+            )
+
+            val status = job.status.name
+                .lowercase(Locale.US)
+                .replace('_', ' ')
+                .replaceFirstChar { it.uppercase() }
+
+            val progress = altrixaLabel(
+                context,
+                "$status · ${job.progress}%"
+            )
+
+            val detail = altrixaLabel(
+                context,
+                strategyNames.ifBlank { "Backtest" }
+            )
+
+            if (job.id == selectedJobId) {
+                title.setTextColor(AltrixaColors.textPrimary)
+            }
+
+            row.addView(title, matchWidth(context))
+            row.addView(
+                progress,
+                matchWidth(context, topMargin = AltrixaDimens.spaceXs)
+            )
+            row.addView(
+                detail,
+                matchWidth(context, topMargin = AltrixaDimens.spaceXs)
+            )
+
+            card.addView(
+                row,
+                matchWidth(
+                    context,
+                    topMargin = if (index == 0) 0 else AltrixaDimens.spaceXs
+                )
+            )
+        }
+
         container.addView(card, topGap(context))
     }
 
@@ -619,6 +710,94 @@ object BacktestScreen {
         "Donchian + EMA Trend" -> "donchian_ema"
         "CPR + EMA Trend" -> "cpr_ema"
         else -> error("Unregistered strategy: ${strategy.name}")
+    }
+
+    /**
+     * Shows persisted backtest jobs so completed results remain discoverable
+     * after leaving the screen or reopening the app.
+     */
+    fun renderSavedTests(
+        context: Context,
+        container: LinearLayout,
+        jobs: List<BacktestJobStore.Job>,
+        onOpenJob: (String) -> Unit
+    ) {
+        if (jobs.isEmpty()) return
+
+        container.addView(altrixaSectionHeader(context, "Saved Tests"))
+
+        val card = altrixaCard(context)
+
+        jobs.take(10).forEachIndexed { index, job ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(
+                    context.dpToPx(10),
+                    context.dpToPx(8),
+                    context.dpToPx(10),
+                    context.dpToPx(8)
+                )
+            }
+
+            val status = job.status.name
+                .lowercase(Locale.US)
+                .replace('_', ' ')
+                .replaceFirstChar { it.uppercase() }
+
+            row.addView(
+                altrixaLabel(
+                    context,
+                    "${job.instrumentSymbol} · ${job.timeframe}"
+                ),
+                matchWidth(context)
+            )
+
+            row.addView(
+                altrixaLabel(
+                    context,
+                    "$status · ${job.progress}% · ${job.currentStep}"
+                ),
+                matchWidth(context, topMargin = AltrixaDimens.spaceXs)
+            )
+
+            row.setOnClickListener {
+                onOpenJob(job.id)
+            }
+
+            card.addView(
+                row,
+                matchWidth(
+                    context,
+                    topMargin = if (index == 0) 0 else AltrixaDimens.spaceXs
+                )
+            )
+        }
+
+        if (jobs.size > 10) {
+            card.addView(
+                altrixaLabel(
+                    context,
+                    "Showing the 10 most recent saved tests"
+                ),
+                matchWidth(context, topMargin = AltrixaDimens.spaceSm)
+            )
+        }
+
+        container.addView(card, topGap(context))
+    }
+
+    private fun timeframeLabel(
+        timeframe: com.algotrader.domain.Timeframe
+    ): String {
+        return when (timeframe) {
+            com.algotrader.domain.Timeframe.MINUTE_1 -> "1m"
+            com.algotrader.domain.Timeframe.MINUTE_5 -> "5m"
+            com.algotrader.domain.Timeframe.MINUTE_15 -> "15m"
+            com.algotrader.domain.Timeframe.MINUTE_30 -> "30m"
+            com.algotrader.domain.Timeframe.HOUR_1 -> "1h"
+            com.algotrader.domain.Timeframe.HOUR_4 -> "4h"
+            com.algotrader.domain.Timeframe.DAY_1 -> "1D"
+        }
     }
 
     private fun resultsEmptySection(context: Context, container: LinearLayout) {
