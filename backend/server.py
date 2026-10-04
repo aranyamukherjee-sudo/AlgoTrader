@@ -878,6 +878,263 @@ def auth_status():
     }
 
 
+# ============================================================
+# F&O market-data boundary
+# ============================================================
+#
+# These endpoints intentionally keep F&O discovery separate from
+# the existing index /history endpoint.
+#
+# No futures symbol, expiry, lot size, margin, or contract is
+# fabricated here. The exact F&O symbol must come from FYERS.
+# ============================================================
+
+@app.get("/futures/expiry-dates")
+def futures_expiry_dates(
+    symbol: str,
+    range_from: str = "",
+    range_to: str = "",
+    date_format: int = 1,
+):
+    """
+    Return FYERS expiry dates for an underlying/index symbol.
+
+    The symbol is passed explicitly to FYERS. No contract is
+    inferred or fabricated by the backend.
+    """
+    if not history_client:
+        return {
+            "status": "error",
+            "message": "FYERS F&O client not ready",
+        }
+
+    if not symbol.strip():
+        return {
+            "status": "error",
+            "message": "Underlying symbol is required",
+        }
+
+    if date_format not in {0, 1}:
+        return {
+            "status": "error",
+            "message": "Unsupported date_format",
+        }
+
+    data = {
+        "symbol": symbol.strip(),
+        "date_format": date_format,
+    }
+
+    if range_from:
+        data["range_from"] = range_from
+
+    if range_to:
+        data["range_to"] = range_to
+
+    try:
+        response = history_client.expiry_dates(data=data)
+
+        if not isinstance(response, dict):
+            return {
+                "status": "error",
+                "message": "Invalid FYERS expiry-dates response",
+            }
+
+        if response.get("s") != "ok":
+            mark_rest_auth_failure(response)
+            return {
+                "status": "error",
+                "fyers": fyers_status,
+                "response": response,
+            }
+
+        mark_rest_auth_success()
+
+        return {
+            "status": "ok",
+            "symbol": symbol.strip(),
+            "response": response,
+        }
+
+    except Exception as error:
+        return {
+            "status": "error",
+            "message": str(error),
+        }
+
+
+@app.get("/futures/chain")
+def futures_chain(
+    symbol: str,
+):
+    """
+    Return the FYERS futures chain for an explicit underlying symbol.
+
+    The FYERS response is intentionally preserved rather than
+    reverse-engineering contract fields into local defaults.
+    """
+    if not history_client:
+        return {
+            "status": "error",
+            "message": "FYERS F&O client not ready",
+        }
+
+    if not symbol.strip():
+        return {
+            "status": "error",
+            "message": "Underlying symbol is required",
+        }
+
+    try:
+        response = history_client.futures_chain(
+            data={
+                "symbol": symbol.strip(),
+            }
+        )
+
+        if not isinstance(response, dict):
+            return {
+                "status": "error",
+                "message": "Invalid FYERS futures-chain response",
+            }
+
+        if response.get("s") != "ok":
+            mark_rest_auth_failure(response)
+            return {
+                "status": "error",
+                "fyers": fyers_status,
+                "response": response,
+            }
+
+        mark_rest_auth_success()
+
+        return {
+            "status": "ok",
+            "symbol": symbol.strip(),
+            "response": response,
+        }
+
+    except Exception as error:
+        return {
+            "status": "error",
+            "message": str(error),
+        }
+
+
+@app.get("/futures/history")
+def futures_history(
+    symbol: str,
+    resolution: str = "5",
+    range_from: str = "",
+    range_to: str = "",
+    date_format: int = 0,
+    include_oi: int = 0,
+    include_greeks: int = 0,
+):
+    """
+    Fetch historical candles for an exact FYERS F&O symbol.
+
+    IMPORTANT:
+    - symbol must be an actual FYERS F&O contract symbol.
+    - The backend does not construct contract symbols.
+    - Index /history candles are never substituted.
+    - No lot size, expiry, margin, or contract metadata is inferred.
+    """
+    if not history_client:
+        return {
+            "status": "error",
+            "message": "FYERS F&O client not ready",
+        }
+
+    exact_symbol = symbol.strip()
+
+    if not exact_symbol:
+        return {
+            "status": "error",
+            "message": "Exact FYERS F&O symbol is required",
+        }
+
+    if resolution not in {"1", "5", "15", "30", "60", "120", "240", "D"}:
+        return {
+            "status": "error",
+            "message": "Unsupported resolution",
+        }
+
+    if date_format not in {0, 1}:
+        return {
+            "status": "error",
+            "message": "Unsupported date_format",
+        }
+
+    if include_oi not in {0, 1}:
+        return {
+            "status": "error",
+            "message": "include_oi must be 0 or 1",
+        }
+
+    if include_greeks not in {0, 1}:
+        return {
+            "status": "error",
+            "message": "include_greeks must be 0 or 1",
+        }
+
+    if not range_from or not range_to:
+        return {
+            "status": "error",
+            "message": (
+                "range_from and range_to are required for "
+                "F&O historical data"
+            ),
+        }
+
+    data = {
+        "symbol": exact_symbol,
+        "resolution": resolution,
+        "date_format": date_format,
+        "range_from": range_from,
+        "range_to": range_to,
+        "include_oi": include_oi,
+        "include_greeks": include_greeks,
+    }
+
+    try:
+        response = history_client.fno_historical_data(data=data)
+
+        if not isinstance(response, dict):
+            return {
+                "status": "error",
+                "message": "Invalid FYERS F&O historical response",
+            }
+
+        if response.get("s") != "ok":
+            mark_rest_auth_failure(response)
+            return {
+                "status": "error",
+                "fyers": fyers_status,
+                "response": response,
+            }
+
+        mark_rest_auth_success()
+
+        return {
+            "status": "ok",
+            "symbol": exact_symbol,
+            "resolution": resolution,
+            "date_format": date_format,
+            "range_from": range_from,
+            "range_to": range_to,
+            "include_oi": include_oi,
+            "include_greeks": include_greeks,
+            "response": response,
+        }
+
+    except Exception as error:
+        return {
+            "status": "error",
+            "message": str(error),
+        }
+
+
 @app.get("/history")
 def history(
     symbol: str = "NSE:NIFTY50-INDEX",
