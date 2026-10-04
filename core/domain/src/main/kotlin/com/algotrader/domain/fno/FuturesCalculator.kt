@@ -18,6 +18,28 @@ object FnoLabels {
 enum class ComparisonState { PASS, FAIL, NOT_COMPARABLE, INVALID_INPUT }
 
 /**
+ * Generic §8.7 comparison record.
+ *
+ * This is deliberately a comparison-layer structure, not a broker-input
+ * structure. Expected values may come from a future fixture loader.
+ *
+ * PASS/FAIL are only meaningful when the comparison is comparable.
+ * NOT_COMPARABLE is not a failure.
+ * INVALID_INPUT identifies an invalid supplied value and does not treat it
+ * as missing.
+ */
+data class ComparisonRecord(
+    val computedOutput: String,
+    val expectedValue: BigDecimal?,
+    val fixtureField: String,
+    val tolerance: BigDecimal,
+    val inputIds: List<InputId>,
+    val state: ComparisonState,
+    val computedValue: BigDecimal?,
+    val reasons: List<String> = emptyList(),
+)
+
+/**
  * Comparison of a displayed exchange turnover with a computed leg value (§8.7).
  * NOT_COMPARABLE is not a failure: it means an input is unknown/invalid or the
  * turnover-leg association is not established.
@@ -29,7 +51,30 @@ data class TurnoverComparison(
     val computedLegValue: BigDecimal?,
     val tolerance: BigDecimal,
     val reasons: List<String>,
-)
+) {
+    /**
+     * §8.7 generic comparison representation.
+     *
+     * The existing turnover comparison remains the source of truth; this
+     * method only exposes its provenance in the common comparison shape.
+     */
+    fun asComparisonRecord(): ComparisonRecord = ComparisonRecord(
+        computedOutput = "contract_leg_value",
+        expectedValue = displayedTurnover,
+        fixtureField = "displayed_turnover",
+        tolerance = tolerance,
+        inputIds = listOf(
+            InputId.ENTRY_PRICE,
+            InputId.EXIT_PRICE,
+            InputId.LOT_SIZE,
+            InputId.LOTS,
+            InputId.DIRECTION,
+        ),
+        state = state,
+        computedValue = computedLegValue,
+        reasons = reasons,
+    )
+}
 
 /** All FNO-1 outputs (§8.4). Each carries kind, evidence, dependencies and warnings. */
 data class FuturesCalculation(

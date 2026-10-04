@@ -603,6 +603,102 @@ class FuturesCalculatorTest {
         assertTrue(errors(listOf(sellOnlyBase, comp("b", both, ChargeBasis.RateOfComponent("a", bd("0.18"))))).any { "must apply on every side" in it })
     }
 
+    // ---- generic comparison record (§8.7) ----------------------------------------------------------------------------------------------------
+
+    @Test
+    fun `comparison record preserves provenance`() {
+        val record = ComparisonRecord(
+            computedOutput = "contract_leg_value",
+            expectedValue = BigDecimal("1463800"),
+            fixtureField = "displayed_turnover",
+            tolerance = BigDecimal.ZERO,
+            inputIds = listOf(
+                InputId.ENTRY_PRICE,
+                InputId.LOT_SIZE,
+                InputId.LOTS,
+            ),
+            state = ComparisonState.PASS,
+            computedValue = BigDecimal("1463800"),
+        )
+
+        assertEquals("contract_leg_value", record.computedOutput)
+        assertEquals(BigDecimal("1463800"), record.expectedValue)
+        assertEquals("displayed_turnover", record.fixtureField)
+        assertEquals(BigDecimal.ZERO, record.tolerance)
+        assertEquals(ComparisonState.PASS, record.state)
+        assertEquals(BigDecimal("1463800"), record.computedValue)
+        assertEquals(
+            listOf(InputId.ENTRY_PRICE, InputId.LOT_SIZE, InputId.LOTS),
+            record.inputIds,
+        )
+    }
+
+    @Test
+    fun `turnover comparison exposes generic comparison record`() {
+        val inputs = priced(schedule = null).copy(
+            displayedTurnover = Input.Known(
+                DisplayedTurnover(
+                    amount = bd("1463800"),
+                    leg = Input.Known(TurnoverLeg.BUY_LEG, Evidence.VERIFIED),
+                ),
+                Evidence.VERIFIED,
+            ),
+        )
+
+        val result = FuturesCalculator.calculate(inputs)
+        val comparison = result.turnoverComparison.asComparisonRecord()
+
+        assertEquals(ComparisonState.PASS, comparison.state)
+        assertEquals(bd("1463800"), comparison.expectedValue)
+        assertEquals(bd("1463800"), comparison.computedValue)
+        assertEquals("displayed_turnover", comparison.fixtureField)
+        assertEquals("contract_leg_value", comparison.computedOutput)
+    }
+
+    @Test
+    fun `not comparable comparison record remains distinct from failure`() {
+        val result = FuturesCalculator.calculate(
+            FuturesInputs(
+                lotSize = Input.Known(65L, Evidence.VERIFIED),
+                lots = Input.Known(bd("1"), Evidence.VERIFIED),
+                entryPrice = Input.Known(bd("22520"), Evidence.VERIFIED),
+                direction = Input.Known(Direction.LONG, Evidence.VERIFIED),
+            )
+        )
+
+        val comparison = result.turnoverComparison.asComparisonRecord()
+
+        assertEquals(ComparisonState.NOT_COMPARABLE, comparison.state)
+        assertNull(comparison.expectedValue)
+        assertNull(comparison.computedValue)
+        assertEquals("displayed_turnover", comparison.fixtureField)
+    }
+
+    @Test
+    fun `invalid turnover comparison remains invalid input`() {
+        val result = FuturesCalculator.calculate(
+            FuturesInputs(
+                lotSize = Input.Known(65L, Evidence.VERIFIED),
+                lots = Input.Known(bd("1"), Evidence.VERIFIED),
+                entryPrice = Input.Known(bd("22520"), Evidence.VERIFIED),
+                direction = Input.Known(Direction.LONG, Evidence.VERIFIED),
+                displayedTurnover = Input.Known(
+                    DisplayedTurnover(
+                        amount = BigDecimal.ZERO,
+                        leg = Input.Known(TurnoverLeg.BUY_LEG, Evidence.VERIFIED),
+                    ),
+                    Evidence.VERIFIED,
+                ),
+            )
+        )
+
+        val comparison = result.turnoverComparison.asComparisonRecord()
+
+        assertEquals(ComparisonState.INVALID_INPUT, comparison.state)
+        assertEquals(BigDecimal.ZERO, comparison.expectedValue)
+        assertNull(comparison.computedValue)
+    }
+
     // ---- purity / determinism -----------------------------------------------------------------------------------------------------------------
 
     @Test
