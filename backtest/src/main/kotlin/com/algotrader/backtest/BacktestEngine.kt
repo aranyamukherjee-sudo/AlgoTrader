@@ -82,6 +82,7 @@ class BacktestEngine(
         var openPosition: OpenPosition? = null
         var realizedPnl = 0.0
         var pendingTarget: TradeDirection? = null
+        var pendingSignalReason: String? = null
         var hasPending = false
 
         val totalBars = sorted.size
@@ -102,25 +103,40 @@ class BacktestEngine(
                 val target = pendingTarget
                 if (target != openPosition?.direction) {
                     openPosition?.let { position ->
-                        val trade = position.close(exitIndex = i, exitTimestamp = bar.timestamp, exitPrice = bar.open)
+                        val trade = position.close(
+                            exitIndex = i,
+                            exitTimestamp = bar.timestamp,
+                            exitPrice = bar.open,
+                            exitReason = ExitReason.STRATEGY_SIGNAL,
+                            exitDetail = pendingSignalReason
+                        )
                         trades += trade
                         realizedPnl += trade.grossPnl
                         openPosition = null
                     }
                     if (target != null) {
                         val flatEquity = config.initialCapital + realizedPnl
-                        val quantity = config.positionSizing.quantityFor(flatEquity, bar.open)
-                        openPosition = OpenPosition(
-                            direction = target,
-                            entryIndex = i,
-                            entryTimestamp = bar.timestamp,
-                            entryPrice = bar.open,
-                            quantity = quantity
+                        val quantity = config.positionSizing.quantityFor(
+                            flatEquity,
+                            bar.open,
+                            config.lotSize
                         )
+                        // A position smaller than one lot cannot be traded:
+                        // skip the entry instead of opening a zero-size trade.
+                        if (quantity > 0.0) {
+                            openPosition = OpenPosition(
+                                direction = target,
+                                entryIndex = i,
+                                entryTimestamp = bar.timestamp,
+                                entryPrice = bar.open,
+                                quantity = quantity
+                            )
+                        }
                     }
                 }
                 hasPending = false
                 pendingTarget = null
+                pendingSignalReason = null
             }
 
             // Step 2: mark-to-market equity using this bar's close, after
@@ -139,6 +155,9 @@ class BacktestEngine(
                 openPosition?.direction,
                 strategy.metadata.direction
             )
+            // Keep the strategy's own explanation of this signal so that, if
+            // it closes the position at the next open, the exit can say why.
+            pendingSignalReason = signal?.reason?.takeIf { it.isNotBlank() }
             hasPending = true
         }
 
@@ -152,7 +171,8 @@ class BacktestEngine(
             val trade = position.close(
                 exitIndex = sorted.lastIndex,
                 exitTimestamp = lastBar.timestamp,
-                exitPrice = lastBar.close
+                exitPrice = lastBar.close,
+                exitReason = ExitReason.END_OF_DATA
             )
             trades += trade
             realizedPnl += trade.grossPnl
@@ -189,7 +209,13 @@ private class OpenPosition(
         TradeDirection.SHORT -> (entryPrice - markPrice) * quantity
     }
 
-    fun close(exitIndex: Int, exitTimestamp: Instant, exitPrice: Double): BacktestTrade = BacktestTrade(
+    fun close(
+        exitIndex: Int,
+        exitTimestamp: Instant,
+        exitPrice: Double,
+        exitReason: ExitReason,
+        exitDetail: String? = null
+    ): BacktestTrade = BacktestTrade(
         direction = direction,
         entryIndex = entryIndex,
         entryTimestamp = entryTimestamp,
@@ -197,6 +223,8 @@ private class OpenPosition(
         exitIndex = exitIndex,
         exitTimestamp = exitTimestamp,
         exitPrice = exitPrice,
-        quantity = quantity
+        quantity = quantity,
+        exitReason = exitReason,
+        exitDetail = exitDetail
     )
 }

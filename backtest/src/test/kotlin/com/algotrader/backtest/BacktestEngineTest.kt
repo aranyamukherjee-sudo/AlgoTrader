@@ -297,4 +297,97 @@ class BacktestEngineTest {
         assertEquals(1, result.trades.size)
         assertEquals(20.0, result.trades.first().quantity, 1e-9)
     }
+
+    // ---- Exit reasons ----
+
+    @Test
+    fun `an exit caused by an opposing signal records the strategy signal reason`() {
+        val candles = testCandles(
+            listOf(100.0 to 100.0, 105.0 to 105.0, 110.0 to 108.0, 112.0 to 112.0)
+        )
+        val strategy = ScriptedStrategy(
+            mapOf(0 to SignalType.BUY, 2 to SignalType.SELL),
+            metadata = longOnly()
+        )
+
+        val trade = BacktestEngine(BacktestConfig(initialCapital = 10_000.0)).run(strategy, candles).trades.single()
+
+        assertEquals(ExitReason.STRATEGY_SIGNAL, trade.exitReason)
+    }
+
+    @Test
+    fun `a position force-closed at the end of data records the end-of-data reason`() {
+        val candles = testCandles(listOf(100.0 to 100.0, 105.0 to 105.0, 110.0 to 110.0))
+        val strategy = ScriptedStrategy(mapOf(0 to SignalType.BUY), metadata = longOnly())
+
+        val trade = BacktestEngine(BacktestConfig(initialCapital = 10_000.0)).run(strategy, candles).trades.single()
+
+        assertEquals(ExitReason.END_OF_DATA, trade.exitReason)
+    }
+
+    // ---- Lot-based (F&O) sizing ----
+
+    private fun niftyCandles() = testCandles(
+        listOf(22_000.0 to 22_000.0, 22_000.0 to 22_050.0, 22_080.0 to 22_090.0, 22_100.0 to 22_100.0)
+    )
+
+    @Test
+    fun `one lot of a 65-unit contract trades 65 units and pnl uses that quantity`() {
+        val strategy = ScriptedStrategy(
+            mapOf(0 to SignalType.BUY, 2 to SignalType.SELL),
+            metadata = longOnly()
+        )
+        val engine = BacktestEngine(
+            BacktestConfig(
+                initialCapital = 100_000.0,
+                positionSizing = PositionSizing.FixedLots(1),
+                lotSize = 65
+            )
+        )
+
+        val trade = engine.run(strategy, niftyCandles()).trades.single()
+
+        assertEquals(65.0, trade.quantity)
+        assertEquals(22_000.0, trade.entryPrice)
+        assertEquals(22_100.0, trade.exitPrice)
+        assertEquals(100.0 * 65.0, trade.grossPnl, 1e-9)
+        assertEquals(22_000.0 * 65.0, trade.notionalExposure, 1e-9)
+    }
+
+    @Test
+    fun `two lots trade 130 units`() {
+        val strategy = ScriptedStrategy(
+            mapOf(0 to SignalType.BUY, 2 to SignalType.SELL),
+            metadata = longOnly()
+        )
+        val engine = BacktestEngine(
+            BacktestConfig(
+                initialCapital = 100_000.0,
+                positionSizing = PositionSizing.FixedLots(2),
+                lotSize = 65
+            )
+        )
+
+        assertEquals(130.0, engine.run(strategy, niftyCandles()).trades.single().quantity)
+    }
+
+    @Test
+    fun `an entry smaller than one lot is skipped rather than opened fractionally`() {
+        val strategy = ScriptedStrategy(
+            mapOf(0 to SignalType.BUY, 2 to SignalType.SELL),
+            metadata = longOnly()
+        )
+        val engine = BacktestEngine(
+            BacktestConfig(
+                initialCapital = 100_000.0,
+                positionSizing = PositionSizing.PercentOfEquity(1.0),
+                lotSize = 65
+            )
+        )
+
+        val result = engine.run(strategy, niftyCandles())
+
+        assertEquals(0, result.trades.size)
+        assertEquals(100_000.0, result.finalEquity)
+    }
 }

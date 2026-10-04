@@ -13,6 +13,10 @@ import androidx.work.Worker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.algotrader.app.MainActivity
+import com.algotrader.app.R
+import com.algotrader.app.notification.AltrixaNotifications
+import com.algotrader.app.theme.AltrixaColors
+import com.algotrader.backtest.BacktestResult
 import com.algotrader.backtest.BacktestConfig
 import com.algotrader.backtest.StrategyBacktestRunner
 import com.algotrader.strategyengine.StrategyFactory
@@ -76,7 +80,8 @@ class BacktestWorker(
 
             val config = BacktestConfig(
                 initialCapital = job.initialCapital,
-                positionSizing = job.positionSizing
+                positionSizing = job.positionSizing,
+                lotSize = BacktestFormat.lotSizeFor(job.instrumentSymbol)
             )
 
             val checkpoint = store.getCheckpoint(jobId)
@@ -316,7 +321,8 @@ class BacktestWorker(
 
             showCompletionNotification(
                 jobId = jobId,
-                strategyCount = results.size
+                job = job,
+                results = results
             )
 
             Result.success(
@@ -329,7 +335,7 @@ class BacktestWorker(
             val message = t.message ?: t::class.java.simpleName
             store.fail(jobId, message)
 
-            showFailureNotification(jobId, message)
+            showFailureNotification(jobId, job, message)
 
             Result.failure(
                 workDataOf(
@@ -469,7 +475,10 @@ class BacktestWorker(
             }
 
         val notification = builder
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_altrixa)
+            .setColor(AltrixaColors.accent)
+            .setSubText("ALTRIXA \u00b7 Backtest")
+            .setCategory(android.app.Notification.CATEGORY_PROGRESS)
             .setContentTitle("ALTRIXA Backtest Running")
             .setContentText(message)
             .setProgress(
@@ -521,7 +530,8 @@ class BacktestWorker(
 
     private fun showCompletionNotification(
         jobId: String,
-        strategyCount: Int
+        job: BacktestJobStore.Job,
+        results: List<BacktestResult>
     ) {
         ensureNotificationChannel()
 
@@ -541,26 +551,27 @@ class BacktestWorker(
             PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentFlags()
         )
 
-        val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            android.app.Notification.Builder(applicationContext, CHANNEL_ID)
-        } else {
-            android.app.Notification.Builder(applicationContext)
-        }
-            .setSmallIcon(android.R.drawable.ic_menu_info_details)
-            .setContentTitle("ALTRIXA backtest complete")
-            .setContentText("$strategyCount strategy result(s) are ready.")
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-            .build()
+        // Presentation is built by AltrixaNotifications (never throws);
+        // channel, ids and the PendingIntent above are unchanged.
+        val notification = AltrixaNotifications.backtestComplete(
+            applicationContext,
+            CHANNEL_ID,
+            pendingIntent,
+            job,
+            results
+        )
 
         manager.notify(
             COMPLETION_NOTIFICATION_BASE + (jobId.hashCode() and 0x0FFFFFFF),
             notification
         )
+
+        AltrixaNotifications.postGroupSummary(applicationContext, CHANNEL_ID)
     }
 
     private fun showFailureNotification(
         jobId: String,
+        job: BacktestJobStore.Job?,
         message: String
     ) {
         ensureNotificationChannel()
@@ -581,22 +592,20 @@ class BacktestWorker(
             PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentFlags()
         )
 
-        val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            android.app.Notification.Builder(applicationContext, CHANNEL_ID)
-        } else {
-            android.app.Notification.Builder(applicationContext)
-        }
-            .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setContentTitle("ALTRIXA backtest failed")
-            .setContentText(message.take(120))
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-            .build()
+        val notification = AltrixaNotifications.backtestFailed(
+            applicationContext,
+            CHANNEL_ID,
+            pendingIntent,
+            job,
+            message
+        )
 
         manager.notify(
             FAILURE_NOTIFICATION_BASE + (jobId.hashCode() and 0x0FFFFFFF),
             notification
         )
+
+        AltrixaNotifications.postGroupSummary(applicationContext, CHANNEL_ID)
     }
 
     private fun ensureNotificationChannel() {

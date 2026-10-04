@@ -7,6 +7,7 @@ import android.content.Context
 import com.algotrader.backtest.BacktestResult
 import com.algotrader.backtest.BacktestTrade
 import com.algotrader.backtest.EquityPoint
+import com.algotrader.backtest.ExitReason
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.backtest.TradeDirection
 import com.algotrader.backtest.PerformanceMetrics
@@ -396,6 +397,11 @@ class BacktestJobStore(context: Context) {
                 put("type", "percent_of_equity")
                 put("percent", sizing.percent)
             }
+
+            is PositionSizing.FixedLots -> JSONObject().apply {
+                put("type", "fixed_lots")
+                put("lots", sizing.lots)
+            }
         }
     }
 
@@ -409,6 +415,10 @@ class BacktestJobStore(context: Context) {
 
             "percent_of_equity" -> PositionSizing.PercentOfEquity(
                 json.getDouble("percent")
+            )
+
+            "fixed_lots" -> PositionSizing.FixedLots(
+                json.getInt("lots")
             )
 
             else -> error(
@@ -430,6 +440,7 @@ class BacktestJobStore(context: Context) {
                         "positionSizing",
                         positionSizingToJson(result.config.positionSizing)
                     )
+                    put("lotSize", result.config.lotSize)
                 }
             )
 
@@ -453,6 +464,12 @@ class BacktestJobStore(context: Context) {
                                 )
                                 put("exitPrice", trade.exitPrice)
                                 put("quantity", trade.quantity)
+                                trade.exitReason?.let {
+                                    put("exitReason", it.name)
+                                }
+                                trade.exitDetail?.let {
+                                    put("exitDetail", it)
+                                }
                                 put("grossPnl", trade.grossPnl)
                                 put("returnPercent", trade.returnPercent)
                                 put(
@@ -543,7 +560,14 @@ class BacktestJobStore(context: Context) {
                             trade.getString("exitTimestamp")
                         ),
                         exitPrice = trade.getDouble("exitPrice"),
-                        quantity = trade.getDouble("quantity")
+                        quantity = trade.getDouble("quantity"),
+                        exitReason = trade.optString("exitReason", "")
+                            .takeIf { it.isNotBlank() }
+                            ?.let { name ->
+                                runCatching { ExitReason.valueOf(name) }.getOrNull()
+                            },
+                        exitDetail = trade.optString("exitDetail", "")
+                            .takeIf { it.isNotBlank() }
                     )
                 )
             }
@@ -593,7 +617,8 @@ class BacktestJobStore(context: Context) {
                 initialCapital = configJson.getDouble("initialCapital"),
                 positionSizing = positionSizingFromJson(
                     configJson.getJSONObject("positionSizing")
-                )
+                ),
+                lotSize = configJson.optInt("lotSize", 1).coerceAtLeast(1)
             ),
             finalEquity = json.getDouble("finalEquity"),
             trades = trades,

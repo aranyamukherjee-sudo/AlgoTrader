@@ -18,13 +18,28 @@ data class BacktestTrade(
     val exitIndex: Int,
     val exitTimestamp: Instant,
     val exitPrice: Double,
-    val quantity: Double
+    val quantity: Double,
+    /** Why the trade was closed; null for results saved before exit reasons were tracked. */
+    val exitReason: ExitReason? = null,
+    /**
+     * For [ExitReason.STRATEGY_SIGNAL]: the strategy's own explanation of the
+     * signal that closed the trade (evaluated on the bar before the exit
+     * fill). Null when unavailable.
+     */
+    val exitDetail: String? = null
 ) {
     val grossPnl: Double
         get() = when (direction) {
             TradeDirection.LONG -> (exitPrice - entryPrice) * quantity
             TradeDirection.SHORT -> (entryPrice - exitPrice) * quantity
         }
+
+    /**
+     * Contract value at entry (entry price x quantity). This is exposure, NOT
+     * the margin or capital required to hold the position.
+     */
+    val notionalExposure: Double
+        get() = entryPrice * quantity
 
     val returnPercent: Double
         get() {

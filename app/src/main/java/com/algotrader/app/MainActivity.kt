@@ -53,6 +53,7 @@ import com.algotrader.backtest.BacktestResult
 import com.algotrader.backtest.StrategyBacktestRunner
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.app.backtest.BacktestJobStore
+import com.algotrader.app.backtest.BacktestFormat
 import com.algotrader.app.backtest.BacktestWorker
 import com.algotrader.strategy.CprEmaTrendStrategy
 import com.algotrader.strategy.Signal
@@ -1704,8 +1705,9 @@ private var isHomeScreenActive = false
         if (isBacktestScreenVisible && activeBacktestJobId != null) {
             // Running job -> Backtest configuration.
             // The WorkManager job continues independently in the background.
-            selectedBacktestJobId = null
-            activeBacktestJobId = null
+            // Keep the selected job ID so returning to Backtest can restore
+            // the same job and show its eventual persisted result.
+            selectedBacktestJobId = activeBacktestJobId
             renderedBacktestJobId = null
             isBacktestResultsScreen = false
             isBacktestScreenVisible = true
@@ -2612,6 +2614,7 @@ private fun renderBacktestConfiguration() {
         ]?.size ?: 0,
         initialCapital = 100_000.0,
         positionQuantity = 1.0,
+        lotSize = selectedInstrument.lotSize,
         strategies = StrategyFactory().let { factory ->
             listOf(
                 "moving_average_crossover",
@@ -2652,6 +2655,16 @@ private fun renderBacktestConfiguration() {
         activeBacktestJobId = job.id
         selectedBacktestJobId = job.id
         restoreBacktestJob(job)
+
+        backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+
+        if (
+            job.status != BacktestJobStore.Status.COMPLETED &&
+            job.status != BacktestJobStore.Status.FAILED &&
+            job.status != BacktestJobStore.Status.CANCELLED
+        ) {
+            backtestProgressHandler.post(backtestProgressRunnable)
+        }
     }
 }
 
@@ -2676,27 +2689,18 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
             } catch (e: Exception) {
                 content.removeAllViews()
 
-                val diagnostic = TextView(this).apply {
-                    text = "RESULT RESTORE ERROR\\n\\n" +
-                        "${e.javaClass.simpleName}: ${e.message}\\n\\n" +
+                BacktestScreen.renderError(
+                    this,
+                    content,
+                    message = "The saved results for this backtest could not be loaded.",
+                    title = "Couldn't load results",
+                    detail = "${e.javaClass.simpleName}: ${e.message}\n\n" +
                         backtestJobStore.debugResultsStorage(job.id)
-                    textSize = 14f
-                    setTextColor(AltrixaColors.textPrimary)
-                    setPadding(
-                        dp(16),
-                        dp(24),
-                        dp(16),
-                        dp(24)
-                    )
+                ) {
+                    activeBacktestJobId = null
+                    renderedBacktestJobId = null
+                    renderBacktestConfiguration()
                 }
-
-                content.addView(
-                    diagnostic,
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                )
 
                 return
             }
@@ -2708,16 +2712,18 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
 
             if (results.isNotEmpty()) {
                 renderedBacktestJobId = job.id
+                isBacktestResultsScreen = true
                 content.removeAllViews()
                 BacktestScreen.renderResults(
                     this,
                     content,
-                    instrumentName = job.instrumentSymbol,
-                    timeframe = selectedTimeframe,
+                    instrumentName = BacktestFormat.instrumentName(job.instrumentSymbol),
+                    timeframe = timeframeLabel(job.timeframe),
                     candleCount = job.candleCount,
                     initialCapital = job.initialCapital,
                     positionSizing = job.positionSizing,
-                    results = results
+                    results = results,
+                    job = job
                 ) {
                     activeBacktestJobId = null
                     renderedBacktestJobId = null
