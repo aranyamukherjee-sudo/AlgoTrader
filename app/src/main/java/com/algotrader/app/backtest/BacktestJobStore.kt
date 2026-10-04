@@ -37,6 +37,32 @@ private const val CANDLES_KEY = "__candles__"
  */
 private val BACKTEST_STORAGE_LOCK = Any()
 
+/**
+ * Explicit instrument classification for persisted backtests.
+ *
+ * INDEX represents the existing index market-data flow.
+ * FUTURES represents a real futures contract and must not silently
+ * substitute index candles.
+ */
+enum class BacktestInstrumentType {
+    INDEX,
+    FUTURES
+}
+
+/**
+ * Identity/configuration for a futures contract.
+ *
+ * Nullable fields are intentional: unknown futures metadata must remain
+ * unknown rather than being fabricated or defaulted.
+ */
+data class FuturesContractConfig(
+    val underlying: String? = null,
+    val contractMonth: String? = null,
+    val expiry: String? = null,
+    val contractId: String? = null,
+    val lotSize: Int? = null
+)
+
 class BacktestJobStore(context: Context) {
 
     enum class Status {
@@ -61,6 +87,8 @@ class BacktestJobStore(context: Context) {
         val instrumentSymbol: String,
         val instrumentExchange: String,
         val instrumentCurrency: String,
+        val instrumentType: BacktestInstrumentType = BacktestInstrumentType.INDEX,
+        val futuresContract: FuturesContractConfig? = null,
         val timeframe: Timeframe,
         val strategies: List<StrategyConfiguration>,
         val initialCapital: Double,
@@ -91,7 +119,9 @@ class BacktestJobStore(context: Context) {
         strategies: List<StrategyConfiguration>,
         initialCapital: Double,
         positionSizing: PositionSizing,
-        candleCount: Int
+        candleCount: Int,
+        instrumentType: BacktestInstrumentType = BacktestInstrumentType.INDEX,
+        futuresContract: FuturesContractConfig? = null
     ): Job {
         require(strategies.isNotEmpty()) {
             "At least one strategy is required for a backtest job"
@@ -105,6 +135,8 @@ class BacktestJobStore(context: Context) {
             instrumentSymbol = instrument.symbol,
             instrumentExchange = instrument.exchange,
             instrumentCurrency = instrument.currency,
+            instrumentType = instrumentType,
+            futuresContract = futuresContract,
             timeframe = timeframe,
             strategies = strategies,
             initialCapital = initialCapital,
@@ -699,6 +731,18 @@ class BacktestJobStore(context: Context) {
             put("instrumentSymbol", job.instrumentSymbol)
             put("instrumentExchange", job.instrumentExchange)
             put("instrumentCurrency", job.instrumentCurrency)
+            put("instrumentType", job.instrumentType.name)
+
+            job.futuresContract?.let { contract ->
+                put("futuresContract", JSONObject().apply {
+                    contract.underlying?.let { put("underlying", it) }
+                    contract.contractMonth?.let { put("contractMonth", it) }
+                    contract.expiry?.let { put("expiry", it) }
+                    contract.contractId?.let { put("contractId", it) }
+                    contract.lotSize?.let { put("lotSize", it) }
+                })
+            }
+
             put("timeframe", job.timeframe.name)
             put("strategies", strategiesToJson(job.strategies))
             put("initialCapital", job.initialCapital)
@@ -720,6 +764,36 @@ class BacktestJobStore(context: Context) {
             instrumentSymbol = json.getString("instrumentSymbol"),
             instrumentExchange = json.getString("instrumentExchange"),
             instrumentCurrency = json.optString("instrumentCurrency", "INR"),
+
+            // Existing saved jobs predate F&O classification, so they are
+            // explicitly restored as INDEX rather than guessed as futures.
+            instrumentType = runCatching {
+                BacktestInstrumentType.valueOf(
+                    json.optString(
+                        "instrumentType",
+                        BacktestInstrumentType.INDEX.name
+                    )
+                )
+            }.getOrDefault(BacktestInstrumentType.INDEX),
+
+            futuresContract = json.optJSONObject("futuresContract")?.let { contract ->
+                FuturesContractConfig(
+                    underlying = contract.optString("underlying", "")
+                        .takeIf { it.isNotEmpty() },
+                    contractMonth = contract.optString("contractMonth", "")
+                        .takeIf { it.isNotEmpty() },
+                    expiry = contract.optString("expiry", "")
+                        .takeIf { it.isNotEmpty() },
+                    contractId = contract.optString("contractId", "")
+                        .takeIf { it.isNotEmpty() },
+                    lotSize = if (contract.has("lotSize") && !contract.isNull("lotSize")) {
+                        contract.optInt("lotSize", 0).takeIf { it > 0 }
+                    } else {
+                        null
+                    }
+                )
+            },
+
             timeframe = Timeframe.valueOf(json.getString("timeframe")),
             strategies = strategiesFromJson(json.getJSONArray("strategies")),
             initialCapital = json.getDouble("initialCapital"),

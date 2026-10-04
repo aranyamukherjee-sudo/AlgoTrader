@@ -91,13 +91,22 @@ data class Candle(
 
 data class InstrumentInfo(
     val displayName: String,
-    val backendSymbol: String
+    val backendSymbol: String,
+    /**
+     * Contract size in units for this instrument's index futures/options
+     * (1 lot = lotSize units). Backtest quantities for these instruments are
+     * always whole lots. Exchanges revise lot sizes periodically, so keep
+     * these in sync with the latest NSE/BSE circulars.
+     */
+    val lotSize: Int = 1
 )
 
 object Instruments {
-    val NIFTY = InstrumentInfo("NIFTY 50", "NSE:NIFTY50-INDEX")
-    val BANK_NIFTY = InstrumentInfo("BANK NIFTY", "NSE:NIFTYBANK-INDEX")
-    val SENSEX = InstrumentInfo("SENSEX", "BSE:SENSEX-INDEX")
+    // NSE index derivatives lot sizes, effective Jan 2026 series.
+    val NIFTY = InstrumentInfo("NIFTY 50", "NSE:NIFTY50-INDEX", lotSize = 65)
+    val BANK_NIFTY = InstrumentInfo("BANK NIFTY", "NSE:NIFTYBANK-INDEX", lotSize = 30)
+    // BSE SENSEX derivatives lot size (verify against the latest BSE circular).
+    val SENSEX = InstrumentInfo("SENSEX", "BSE:SENSEX-INDEX", lotSize = 20)
     val all = listOf(NIFTY, BANK_NIFTY, SENSEX)
 }
 
@@ -2615,6 +2624,7 @@ private fun renderBacktestConfiguration() {
         initialCapital = 100_000.0,
         positionQuantity = 1.0,
         lotSize = selectedInstrument.lotSize,
+        instrumentType = com.algotrader.app.backtest.BacktestInstrumentType.INDEX,
         strategies = StrategyFactory().let { factory ->
             listOf(
                 "moving_average_crossover",
@@ -2898,7 +2908,19 @@ private fun timeframeLabel(
 }
 
 
-private fun runBacktest() {
+private fun runBacktest(
+    instrumentType: com.algotrader.app.backtest.BacktestInstrumentType =
+        com.algotrader.app.backtest.BacktestInstrumentType.INDEX
+) {
+    if (instrumentType == com.algotrader.app.backtest.BacktestInstrumentType.FUTURES) {
+        Toast.makeText(
+            this,
+            "Futures backtesting is not available yet. Real futures candles are required.",
+            Toast.LENGTH_LONG
+        ).show()
+        return
+    }
+
     val uiCandles = candlesByInstrument[
         "${selectedInstrument.backendSymbol}|$selectedTimeframe"
     ]

@@ -1,5 +1,7 @@
 package com.algotrader.app.ui.screens
 
+import com.algotrader.app.backtest.BacktestInstrumentType
+
 import android.content.Context
 import android.graphics.Typeface
 import android.text.InputType
@@ -77,10 +79,12 @@ object BacktestScreen {
         positionQuantity: Double,
         strategies: List<Strategy>,
         lotSize: Int = 1,
+        instrumentType: BacktestInstrumentType = BacktestInstrumentType.INDEX,
         onRunBacktest: (
             List<StrategyConfiguration>,
             Double,
-            PositionSizing
+            PositionSizing,
+            BacktestInstrumentType
         ) -> Unit
     ) {
         header(context, container, "Strategy performance analysis")
@@ -112,6 +116,74 @@ object BacktestScreen {
             )
         }
         container.addView(setup, topGap(context))
+
+        // ---- Instrument type ----
+        container.addView(altrixaSectionHeader(context, "Instrument type"))
+        val instrumentTypeCard = altrixaCard(context)
+
+        var selectedInstrumentType = instrumentType
+
+        val instrumentTypeToggle = altrixaSegmented(
+            context,
+            listOf("INDEX", "FUTURES"),
+            if (selectedInstrumentType == BacktestInstrumentType.FUTURES) 1 else 0
+        ) { index ->
+            selectedInstrumentType = if (index == 1) {
+                BacktestInstrumentType.FUTURES
+            } else {
+                BacktestInstrumentType.INDEX
+            }
+
+            if (selectedInstrumentType == BacktestInstrumentType.FUTURES) {
+                instrumentTypeCard.removeViews(1, instrumentTypeCard.childCount - 1)
+                instrumentTypeCard.addView(
+                    altrixaBanner(
+                        context,
+                        "Futures backtesting is not available yet. " +
+                            "A real futures contract and futures historical candles are required. " +
+                            "Index candles will not be substituted.",
+                        AltrixaTone.WARNING
+                    ),
+                    matchWidth(context, topMargin = AltrixaDimens.spaceMd)
+                )
+            } else {
+                instrumentTypeCard.removeViews(1, instrumentTypeCard.childCount - 1)
+                instrumentTypeCard.addView(
+                    altrixaBanner(
+                        context,
+                        "Index backtests use the loaded index market-data candles.",
+                        AltrixaTone.POSITIVE
+                    ),
+                    matchWidth(context, topMargin = AltrixaDimens.spaceMd)
+                )
+            }
+        }
+
+        instrumentTypeCard.addView(
+            instrumentTypeToggle,
+            matchWidth(context)
+        )
+
+        instrumentTypeCard.addView(
+            altrixaBanner(
+                context,
+                if (selectedInstrumentType == BacktestInstrumentType.FUTURES) {
+                    "Futures backtesting is not available yet. " +
+                        "A real futures contract and futures historical candles are required. " +
+                        "Index candles will not be substituted."
+                } else {
+                    "Index backtests use the loaded index market-data candles."
+                },
+                if (selectedInstrumentType == BacktestInstrumentType.FUTURES) {
+                    AltrixaTone.WARNING
+                } else {
+                    AltrixaTone.POSITIVE
+                }
+            ),
+            matchWidth(context, topMargin = AltrixaDimens.spaceMd)
+        )
+
+        container.addView(instrumentTypeCard, topGap(context))
 
         // ---- Capital & sizing ----
         container.addView(altrixaSectionHeader(context, "Capital & sizing"))
@@ -301,7 +373,12 @@ object BacktestScreen {
                 else -> PositionSizing.FixedQuantity(parsedQuantity)
             }
 
-            onRunBacktest(configurations, capitalValue, sizing)
+            onRunBacktest(
+                configurations,
+                capitalValue,
+                sizing,
+                selectedInstrumentType
+            )
         }
 
         refreshSummary()
