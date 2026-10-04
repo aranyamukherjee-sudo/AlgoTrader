@@ -16,6 +16,7 @@ import com.algotrader.app.ui.components.AltrixaIconKind
 import com.algotrader.app.ui.components.AltrixaProgressBar
 import com.algotrader.app.ui.components.AltrixaSplitBar
 import com.algotrader.app.ui.components.AltrixaTone
+import com.algotrader.app.ui.components.altrixaBanner
 import com.algotrader.app.ui.components.altrixaCaption
 import com.algotrader.app.ui.components.altrixaCard
 import com.algotrader.app.ui.components.altrixaChip
@@ -29,6 +30,7 @@ import com.algotrader.app.ui.components.altrixaStatusBadge
 import com.algotrader.app.ui.components.altrixaStatusBlock
 import com.algotrader.app.ui.components.altrixaToneColor
 import com.algotrader.backtest.BacktestResult
+import com.algotrader.backtest.BacktestSample
 import com.algotrader.backtest.BacktestTrade
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.backtest.TradeDirection
@@ -77,6 +79,12 @@ internal object BacktestResultsScreen {
                 BacktestScreen.matchWidth(context)
             )
             container.addView(card, BacktestScreen.topGap(context))
+        } else if (results.any { it.sample != BacktestSample.FULL }) {
+            outOfSampleBody(context, container, results, instrumentName, timeframe, intraday)
+            configurationCard(
+                context, container, results, instrumentName, timeframe,
+                candleCount, initialCapital, positionSizing, job
+            )
         } else if (results.size == 1) {
             val result = results.first()
             resultBody(context, container, result, instrumentName, timeframe)
@@ -110,8 +118,61 @@ internal object BacktestResultsScreen {
     // Strategy comparison (when a job holds more than one strategy result)
     // -----------------------------------------------------------------
 
-    private fun comparisonCard(context: Context, container: LinearLayout, results: List<BacktestResult>) {
-        container.addView(altrixaSectionHeader(context, "Strategy comparison"))
+    /**
+     * Out-of-sample run: the In-Sample and Out-of-Sample segments are different
+     * periods, so each is shown (and ranked) only among its own results and the
+     * two are never ranked against each other. Strategy parameters are
+     * unchanged; no optimization is implied.
+     */
+    private fun outOfSampleBody(
+        context: Context,
+        container: LinearLayout,
+        results: List<BacktestResult>,
+        instrumentName: String,
+        timeframe: String,
+        intraday: Boolean
+    ) {
+        container.addView(altrixaSectionHeader(context, "Out-of-sample test"))
+        val note = altrixaCard(context)
+        note.addView(
+            altrixaBanner(
+                context,
+                "Chronological 70% In-Sample / 30% Out-of-Sample, backtested separately. " +
+                    "The two segments cover different periods and are not ranked against each other.",
+                AltrixaTone.ACCENT
+            ),
+            BacktestScreen.matchWidth(context)
+        )
+        container.addView(note, BacktestScreen.topGap(context))
+
+        listOf(
+            Triple(BacktestSample.IN_SAMPLE, "In-Sample", "In-Sample \u00b7 first 70% of candles"),
+            Triple(BacktestSample.OUT_OF_SAMPLE, "Out-of-Sample", "Out-of-Sample \u00b7 final 30% of candles")
+        ).forEach { (sample, label, title) ->
+            val group = results
+                .filter { it.sample == sample }
+                .map { it.copy(strategyName = "${it.strategyName} \u00b7 $label") }
+            if (group.isEmpty()) return@forEach
+
+            if (group.size > 1) {
+                comparisonCard(context, container, group, title)
+            } else {
+                container.addView(altrixaSectionHeader(context, title))
+            }
+            group.forEach { result ->
+                resultBody(context, container, result, instrumentName, timeframe)
+                tradesSection(context, container, result.trades, intraday, result.config.lotSize)
+            }
+        }
+    }
+
+    private fun comparisonCard(
+        context: Context,
+        container: LinearLayout,
+        results: List<BacktestResult>,
+        title: String = "Strategy comparison"
+    ) {
+        container.addView(altrixaSectionHeader(context, title))
         val card = altrixaCard(context)
 
         val ranked = results.sortedByDescending { it.metrics.netProfit }

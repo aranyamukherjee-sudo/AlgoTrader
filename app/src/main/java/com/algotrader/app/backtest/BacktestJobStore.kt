@@ -5,6 +5,8 @@ import com.algotrader.backtest.BacktestConfig
 
 import android.content.Context
 import com.algotrader.backtest.BacktestResult
+import com.algotrader.backtest.BacktestRunScope
+import com.algotrader.backtest.BacktestSample
 import com.algotrader.backtest.BacktestTrade
 import com.algotrader.backtest.EquityPoint
 import com.algotrader.backtest.ExitReason
@@ -63,7 +65,18 @@ data class FuturesContractConfig(
     val lotSize: Int? = null
 )
 
-class BacktestJobStore(context: Context) {
+class BacktestJobStore internal constructor(
+    private val storageDir: File
+) {
+
+    /** Production constructor: app-private files directory. */
+    constructor(context: Context) : this(
+        context.applicationContext.getFileStreamPath(FILE_NAME).parentFile
+            ?: context.applicationContext.filesDir
+    )
+
+    // The internal primary constructor takes a directory so the storage rules
+    // (cancel / delete / reload) can be unit-tested on the JVM without Android.
 
     enum class Status {
         QUEUED,
@@ -83,6 +96,15 @@ class BacktestJobStore(context: Context) {
 
     data class Job(
         val id: String,
+        /**
+         * Shared identifier for strategies launched by the same Backtest run.
+         *
+         * Nullable for backwards compatibility with jobs created before
+         * multi-strategy result grouping existed.
+         */
+        val runId: String? = null,
+        /** FULL for a standard job; IN_SAMPLE / OUT_OF_SAMPLE for the two segments of an OOS launch. */
+        val sample: BacktestSample = BacktestSample.FULL,
         val status: Status,
         val instrumentSymbol: String,
         val instrumentExchange: String,
@@ -102,9 +124,7 @@ class BacktestJobStore(context: Context) {
         val errorMessage: String? = null
     )
 
-    private val appContext = context.applicationContext
-    private val file = appContext.getFileStreamPath(FILE_NAME)
-    private val storageDir = file.parentFile ?: appContext.filesDir
+    private val file = File(storageDir, FILE_NAME)
 
     init {
         synchronized(BACKTEST_STORAGE_LOCK) {
@@ -121,7 +141,9 @@ class BacktestJobStore(context: Context) {
         positionSizing: PositionSizing,
         candleCount: Int,
         instrumentType: BacktestInstrumentType = BacktestInstrumentType.INDEX,
-        futuresContract: FuturesContractConfig? = null
+        futuresContract: FuturesContractConfig? = null,
+        runId: String? = null,
+        sample: BacktestSample = BacktestSample.FULL
     ): Job {
         require(strategies.isNotEmpty()) {
             "At least one strategy is required for a backtest job"
@@ -131,6 +153,8 @@ class BacktestJobStore(context: Context) {
 
         val job = Job(
             id = UUID.randomUUID().toString(),
+            runId = runId,
+            sample = sample,
             status = Status.QUEUED,
             instrumentSymbol = instrument.symbol,
             instrumentExchange = instrument.exchange,
@@ -160,8 +184,14 @@ class BacktestJobStore(context: Context) {
         currentStep: String? = null,
         errorMessage: String? = null,
         completedAt: Instant? = null
-    ): Job? {
-        val existing = get(jobId) ?: return null
+    ): Job? = synchronized(BACKTEST_STORAGE_LOCK) {
+        val existing = get(jobId) ?: return@synchronized null
+
+        // A cancelled job is final. The Worker may still be mid-flight when the
+        // user cancels; its late progress/complete/fail writes must never
+        // resurrect the job. The unchanged CANCELLED job is returned so the
+        // caller can see the cancellation and stop.
+        if (existing.status == Status.CANCELLED) return@synchronized existing
 
         val updated = existing.copy(
             status = status ?: existing.status,
@@ -173,7 +203,7 @@ class BacktestJobStore(context: Context) {
         )
 
         writeJob(updated)
-        return updated
+        updated
     }
 
     @Synchronized
@@ -191,6 +221,7 @@ class BacktestJobStore(context: Context) {
     @Synchronized
     fun clearCheckpointAndComplete(jobId: String): Job? {
         val existing = get(jobId) ?: return null
+        if (existing.status == Status.CANCELLED) return existing
         val now = Instant.now()
 
         deleteStorageFile(checkpointFile(jobId))
@@ -219,13 +250,102 @@ class BacktestJobStore(context: Context) {
         )
     }
 
+    /**
+     * Persists a single job as CANCELLED. Reuses the existing CANCELLED status.
+     *
+     * Only an active job can be cancelled: COMPLETED / FAILED / CANCELLED jobs
+     * are returned unchanged, so a finished result can never be turned into a
+     * cancelled one.
+     */
     @Synchronized
-    fun cancel(jobId: String): Job? {
-        return update(
-            jobId = jobId,
+    fun cancel(jobId: String): Job? = synchronized(BACKTEST_STORAGE_LOCK) {
+        val existing = get(jobId) ?: return@synchronized null
+        if (existing.status in TERMINAL_STATUSES) return@synchronized existing
+
+        val cancelled = existing.copy(
             status = Status.CANCELLED,
-            currentStep = "Cancelled"
+            currentStep = "Cancelled",
+            updatedAt = Instant.now(),
+            errorMessage = null
         )
+        writeJob(cancelled)
+        // Partial strategy results must never be resumed or presented.
+        deleteStorageFile(checkpointFile(jobId))
+        cancelled
+    }
+
+    /**
+     * Cancels the whole logical launch that [jobId] belongs to: every job
+     * sharing its runId (standard: all strategy jobs; OOS: every In-Sample and
+     * Out-of-Sample job). A legacy job without runId cancels only itself.
+     * Jobs of other runs are never touched. Already-finished siblings keep
+     * their status.
+     *
+     * @return the ids of the jobs that were actually moved to CANCELLED.
+     */
+    @Synchronized
+    fun cancelRun(jobId: String): List<String> = synchronized(BACKTEST_STORAGE_LOCK) {
+        val target = get(jobId) ?: return@synchronized emptyList()
+        runMembers(target)
+            .filter { it.status !in TERMINAL_STATUSES }
+            .mapNotNull { member ->
+                cancel(member.id)?.takeIf { it.status == Status.CANCELLED }?.id
+            }
+    }
+
+    /** True when any job of the launch [jobId] belongs to is still active. */
+    @Synchronized
+    fun isRunActive(jobId: String): Boolean {
+        val target = get(jobId) ?: return false
+        return runMembers(target).any { it.status !in TERMINAL_STATUSES }
+    }
+
+    /** All jobs of the logical launch [target] belongs to (itself only for legacy jobs). */
+    @Synchronized
+    fun runMembers(target: Job): List<Job> =
+        BacktestRunScope.members(list(), target, { it.id }, { it.runId })
+
+    sealed interface DeleteOutcome {
+        /** The ids of every job removed (a whole run for runId jobs). */
+        data class Deleted(val jobIds: List<String>) : DeleteOutcome
+        /** Nothing removed: part of the run is still running; cancel it first. */
+        object StillActive : DeleteOutcome
+        object NotFound : DeleteOutcome
+    }
+
+    /**
+     * Permanently deletes a saved test. For a runId job this is the whole
+     * logical run (never one segment), so no In-Sample / Out-of-Sample sibling
+     * is orphaned. A legacy job without runId is deleted individually.
+     *
+     * Removes, per job: the root job-index entry, saved results (dedicated file
+     * and the copy inside the root), candles and checkpoint. Active runs are
+     * refused rather than deleted from under a running Worker.
+     */
+    @Synchronized
+    fun deleteRun(jobId: String): DeleteOutcome = synchronized(BACKTEST_STORAGE_LOCK) {
+        val target = get(jobId) ?: return@synchronized DeleteOutcome.NotFound
+        val members = runMembers(target)
+
+        if (members.any { it.status !in TERMINAL_STATUSES }) {
+            return@synchronized DeleteOutcome.StillActive
+        }
+
+        val ids = members.map { it.id }
+        val root = readRoot()
+        ids.forEach { id -> root.remove(id) }
+        root.optJSONObject(RESULTS_KEY)?.let { results -> ids.forEach { results.remove(it) } }
+        root.optJSONObject(CANDLES_KEY)?.let { candles -> ids.forEach { candles.remove(it) } }
+        root.optJSONObject(CHECKPOINTS_KEY)?.let { cps -> ids.forEach { cps.remove(it) } }
+        writeRoot(root)
+
+        ids.forEach { id ->
+            deleteStorageFile(resultsFile(id))
+            deleteStorageFile(candlesFile(id))
+            deleteStorageFile(checkpointFile(id))
+        }
+
+        DeleteOutcome.Deleted(ids)
     }
 
     @Synchronized
@@ -254,12 +374,20 @@ class BacktestJobStore(context: Context) {
         return jobs.sortedByDescending { it.createdAt }
     }
 
+    private fun isCancelledOrMissing(jobId: String): Boolean {
+        val job = get(jobId)
+        return job == null || job.status == Status.CANCELLED
+    }
+
     @Synchronized
     fun saveCheckpoint(
         jobId: String,
         startedAtMillis: Long,
         results: List<BacktestResult>
     ) {
+        // Never (re)create files for a job that was cancelled or deleted.
+        if (isCancelledOrMissing(jobId)) return
+
         val checkpoint = JSONObject().apply {
             put("startedAtMillis", startedAtMillis)
 
@@ -305,6 +433,9 @@ class BacktestJobStore(context: Context) {
             require(results.isNotEmpty()) {
                 "Cannot save empty backtest results"
             }
+
+            // Never (re)create results for a job that was cancelled or deleted.
+            if (isCancelledOrMissing(jobId)) return
 
             val array = JSONArray()
             results.forEach { array.put(resultToJson(it)) }
@@ -352,21 +483,29 @@ class BacktestJobStore(context: Context) {
 
     @Synchronized
     fun getResults(jobId: String): List<BacktestResult> {
-        val dedicated = readJsonArrayFile(resultsFile(jobId))
-        val array = dedicated ?: readRoot()
-            .optJSONObject(RESULTS_KEY)
-            ?.optJSONArray(jobId)
-            ?: return emptyList()
+        /*
+         * Activity and Worker use separate BacktestJobStore instances.
+         * Therefore @Synchronized alone does not coordinate result reads
+         * with saveResults(). Use the same process-wide storage lock for
+         * the complete read transaction.
+         */
+        synchronized(BACKTEST_STORAGE_LOCK) {
+            val dedicated = readJsonArrayFile(resultsFile(jobId))
+            val array = dedicated ?: readRoot()
+                .optJSONObject(RESULTS_KEY)
+                ?.optJSONArray(jobId)
+                ?: return emptyList()
 
-        return buildList {
-            for (index in 0 until array.length()) {
-                try {
-                    add(resultFromJson(array.getJSONObject(index)))
-                } catch (e: Exception) {
-                    throw IllegalStateException(
-                        "Saved result $index could not be restored: ${e.javaClass.simpleName}: ${e.message}",
-                        e
-                    )
+            return buildList {
+                for (index in 0 until array.length()) {
+                    try {
+                        add(resultFromJson(array.getJSONObject(index)))
+                    } catch (e: Exception) {
+                        throw IllegalStateException(
+                            "Saved result $index could not be restored: ${e.javaClass.simpleName}: ${e.message}",
+                            e
+                        )
+                    }
                 }
             }
         }
@@ -462,6 +601,7 @@ class BacktestJobStore(context: Context) {
     private fun resultToJson(result: BacktestResult): JSONObject {
         return JSONObject().apply {
             put("strategyName", result.strategyName)
+            put("sample", result.sample.name)
             put("finalEquity", result.finalEquity)
 
             put(
@@ -655,7 +795,13 @@ class BacktestJobStore(context: Context) {
             finalEquity = json.getDouble("finalEquity"),
             trades = trades,
             equityCurve = equityCurve,
-            metrics = metrics
+            metrics = metrics,
+            // Results saved before out-of-sample testing have no "sample" key.
+            sample = runCatching {
+                BacktestSample.valueOf(
+                    json.optString("sample", BacktestSample.FULL.name)
+                )
+            }.getOrDefault(BacktestSample.FULL)
         )
     }
 
@@ -727,6 +873,8 @@ class BacktestJobStore(context: Context) {
     private fun jobToJson(job: Job): JSONObject {
         return JSONObject().apply {
             put("id", job.id)
+            job.runId?.let { put("runId", it) }
+            put("sample", job.sample.name)
             put("status", job.status.name)
             put("instrumentSymbol", job.instrumentSymbol)
             put("instrumentExchange", job.instrumentExchange)
@@ -760,6 +908,15 @@ class BacktestJobStore(context: Context) {
     private fun jobFromJson(json: JSONObject): Job {
         return Job(
             id = json.getString("id"),
+            runId = json.optString("runId", "")
+                .takeIf { it.isNotEmpty() },
+            // Jobs saved before out-of-sample testing have no "sample" key:
+            // they are standard (FULL) jobs.
+            sample = runCatching {
+                BacktestSample.valueOf(
+                    json.optString("sample", BacktestSample.FULL.name)
+                )
+            }.getOrDefault(BacktestSample.FULL),
             status = Status.valueOf(json.getString("status")),
             instrumentSymbol = json.getString("instrumentSymbol"),
             instrumentExchange = json.getString("instrumentExchange"),
@@ -971,6 +1128,12 @@ class BacktestJobStore(context: Context) {
     }
 
     companion object {
+        private val TERMINAL_STATUSES = setOf(
+            Status.COMPLETED,
+            Status.FAILED,
+            Status.CANCELLED
+        )
+
         private const val FILE_NAME = "backtest_jobs.json"
         private const val LEGACY_MIGRATION_MARKER =
             "backtest_storage_migration_v1.done"

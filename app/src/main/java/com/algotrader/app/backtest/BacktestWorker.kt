@@ -48,6 +48,12 @@ class BacktestWorker(
                 workDataOf(KEY_ERROR to "Backtest job not found: $jobId")
             )
 
+        // The user cancelled this launch while the job was still queued. Do not
+        // start it, and leave its persisted CANCELLED state exactly as it is.
+        if (job.status == BacktestJobStore.Status.CANCELLED) {
+            return Result.failure(workDataOf(KEY_ERROR to "Cancelled"))
+        }
+
         return try {
             setForegroundAsync(
                 createForegroundInfo(
@@ -130,6 +136,9 @@ class BacktestWorker(
                 }
 
                 if (isStopped) {
+                    // WorkManager was stopped because the user cancelled/deleted
+                    // the launch (not an OS interruption): do not retry it.
+                    throwIfCancelled(jobId)
                     store.update(
                         jobId,
                         BacktestJobStore.Status.RUNNING,
@@ -161,7 +170,10 @@ class BacktestWorker(
                     backtestConfig = config
                 ) { processed, candleTotal ->
 
-                    if (isStopped) return@run
+                    if (isStopped) {
+                        throwIfCancelled(jobId)
+                        return@run
+                    }
 
                     val localProgress = if (candleTotal <= 0) {
                         100
@@ -193,7 +205,8 @@ class BacktestWorker(
                     )
                 }
 
-                results += result
+                // Tag the result with this job's segment (FULL for standard jobs).
+                results += result.copy(sample = job.sample)
 
                 android.util.Log.i(
                     "ALTRIXA_BACKTEST",
@@ -303,13 +316,19 @@ class BacktestWorker(
                 "Completing backtest"
             )
 
-            store.update(
+            val completed = store.update(
                 jobId = jobId,
                 status = BacktestJobStore.Status.COMPLETED,
                 progress = 100,
                 currentStep = "Complete",
                 errorMessage = null
             )
+
+            // A cancel that landed during the final save must win: no
+            // completion notification, no completed state.
+            if (completed == null || completed.status == BacktestJobStore.Status.CANCELLED) {
+                throw BacktestCancelledException()
+            }
 
             setProgressAsync(
                 workDataOf(
@@ -331,11 +350,18 @@ class BacktestWorker(
                     KEY_PROGRESS to 100
                 )
             )
+        } catch (e: BacktestCancelledException) {
+            // The persisted state is already CANCELLED (or the job was deleted).
+            // Drop any partial checkpoint; no notification, no result.
+            store.clearCheckpoint(jobId)
+            Result.failure(workDataOf(KEY_JOB_ID to jobId, KEY_ERROR to "Cancelled"))
         } catch (t: Throwable) {
             val message = t.message ?: t::class.java.simpleName
-            store.fail(jobId, message)
+            val failed = store.fail(jobId, message)
 
-            showFailureNotification(jobId, job, message)
+            if (failed != null && failed.status == BacktestJobStore.Status.FAILED) {
+                showFailureNotification(jobId, job, message)
+            }
 
             Result.failure(
                 workDataOf(
@@ -505,19 +531,35 @@ class BacktestWorker(
         }
     }
 
+    /** Thrown when the persisted job was cancelled or deleted while this Worker ran. */
+    private class BacktestCancelledException : RuntimeException("Backtest cancelled")
+
+    private fun throwIfCancelled(jobId: String) {
+        val current = store.get(jobId)
+        if (current == null || current.status == BacktestJobStore.Status.CANCELLED) {
+            throw BacktestCancelledException()
+        }
+    }
+
     private fun update(
         jobId: String,
         status: BacktestJobStore.Status,
         progress: Int,
         step: String
     ) {
-        store.update(
+        val written = store.update(
             jobId = jobId,
             status = status,
             progress = progress,
             currentStep = step,
             errorMessage = null
         )
+
+        // store.update never overwrites a CANCELLED job; a cancelled or deleted
+        // job stops this Worker instead of continuing to compute.
+        if (written == null || written.status == BacktestJobStore.Status.CANCELLED) {
+            throw BacktestCancelledException()
+        }
 
         setProgressAsync(
             Data.Builder()

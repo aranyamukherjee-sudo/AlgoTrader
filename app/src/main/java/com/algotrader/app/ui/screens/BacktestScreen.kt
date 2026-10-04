@@ -26,6 +26,7 @@ import com.algotrader.app.ui.components.altrixaInput
 import com.algotrader.app.ui.components.altrixaLabel
 import com.algotrader.app.ui.components.altrixaPrimaryButton
 import com.algotrader.app.ui.components.altrixaRounded
+import com.algotrader.app.ui.components.altrixaSecondaryButton
 import com.algotrader.app.ui.components.altrixaSectionHeader
 import com.algotrader.app.ui.components.altrixaSegmented
 import com.algotrader.app.ui.components.altrixaStatusBadge
@@ -33,7 +34,10 @@ import com.algotrader.app.ui.components.altrixaStatusBlock
 import com.algotrader.app.ui.components.altrixaStyleInput
 import com.algotrader.app.ui.components.altrixaTint
 import com.algotrader.app.ui.components.altrixaTitle
+import com.algotrader.backtest.BacktestModeLabel
 import com.algotrader.backtest.BacktestResult
+import com.algotrader.backtest.BacktestSample
+import com.algotrader.backtest.OutOfSampleSplit
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.strategy.PositionDirection
 import com.algotrader.strategy.Strategy
@@ -59,6 +63,7 @@ object BacktestScreen {
     private const val TAG_BAR = "BT_BAR"
     private const val TAG_STEP = "BT_STEP"
     private const val TAG_ETA = "BT_ETA"
+    private const val TAG_CANCEL = "BT_CANCEL"
 
     // -----------------------------------------------------------------
     // Idle / configuration state
@@ -84,7 +89,8 @@ object BacktestScreen {
             List<StrategyConfiguration>,
             Double,
             PositionSizing,
-            BacktestInstrumentType
+            BacktestInstrumentType,
+            Boolean
         ) -> Unit
     ) {
         header(context, container, "Strategy performance analysis")
@@ -184,6 +190,40 @@ object BacktestScreen {
         )
 
         container.addView(instrumentTypeCard, topGap(context))
+
+        // ---- Test mode ----
+        container.addView(altrixaSectionHeader(context, "Test mode"))
+        val testModeCard = altrixaCard(context)
+        var outOfSampleMode = false
+        val testModeNote = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+
+        fun refreshTestModeNote() {
+            testModeNote.removeAllViews()
+            testModeNote.addView(
+                altrixaBanner(
+                    context,
+                    if (outOfSampleMode) {
+                        "Chronological 70% In-Sample / 30% Out-of-Sample, backtested separately. " +
+                            "Requires at least ${OutOfSampleSplit.MIN_TOTAL_CANDLES} candles."
+                    } else {
+                        "Each strategy is backtested once on all loaded candles."
+                    },
+                    AltrixaTone.ACCENT
+                ),
+                matchWidth(context)
+            )
+        }
+
+        testModeCard.addView(
+            altrixaSegmented(context, listOf("Standard", "Out-of-Sample"), 0) { index ->
+                outOfSampleMode = index == 1
+                refreshTestModeNote()
+            },
+            matchWidth(context)
+        )
+        testModeCard.addView(testModeNote, matchWidth(context, topMargin = AltrixaDimens.spaceMd))
+        refreshTestModeNote()
+        container.addView(testModeCard, topGap(context))
 
         // ---- Capital & sizing ----
         container.addView(altrixaSectionHeader(context, "Capital & sizing"))
@@ -377,7 +417,8 @@ object BacktestScreen {
                 configurations,
                 capitalValue,
                 sizing,
-                selectedInstrumentType
+                selectedInstrumentType,
+                outOfSampleMode
             )
         }
 
@@ -580,7 +621,12 @@ object BacktestScreen {
         candleCount: Int,
         strategies: List<Strategy>,
         progress: Int = 0,
-        currentStep: String = "Queued"
+        currentStep: String = "Queued",
+        /**
+         * Cancels the whole logical launch. Non-null only while the launch is
+         * active; completed / failed / cancelled runs never render the button.
+         */
+        onCancel: (() -> Unit)? = null
     ) {
         header(context, container, "Strategy performance analysis")
 
@@ -657,6 +703,15 @@ object BacktestScreen {
             ),
             matchWidth(context, topMargin = AltrixaDimens.spaceMd)
         )
+        if (onCancel != null) {
+            card.addView(
+                altrixaSecondaryButton(context, "Cancel Backtest") { onCancel() }.apply {
+                    tag = TAG_CANCEL
+                    setTextColor(AltrixaColors.negative)
+                },
+                matchWidth(context, topMargin = AltrixaDimens.spaceMd)
+            )
+        }
         container.addView(card, topGap(context))
 
         updateRunning(container, progress, currentStep)
@@ -726,6 +781,7 @@ object BacktestScreen {
         context: Context,
         container: LinearLayout,
         jobs: List<BacktestJobStore.Job>,
+        onDeleteJob: ((String) -> Unit)? = null,
         onOpenJob: (String) -> Unit
     ) {
         container.addView(altrixaSectionHeader(context, "Saved Tests"))
@@ -748,7 +804,13 @@ object BacktestScreen {
 
         jobs.take(10).forEachIndexed { index, job ->
             card.addView(
-                historyRow(context, job, highlighted = false, onClick = onOpenJob),
+                historyRow(
+                    context,
+                    job,
+                    highlighted = false,
+                    onClick = onOpenJob,
+                    onDelete = onDeleteJob
+                ),
                 matchWidth(context, topMargin = if (index == 0) 0 else AltrixaDimens.spaceSm)
             )
         }
@@ -769,7 +831,8 @@ object BacktestScreen {
         context: Context,
         job: BacktestJobStore.Job,
         highlighted: Boolean,
-        onClick: (String) -> Unit
+        onClick: (String) -> Unit,
+        onDelete: ((String) -> Unit)? = null
     ): LinearLayout {
         val names = job.strategies.map { BacktestFormat.strategyName(it.strategyId) }
         val title = when {
@@ -826,6 +889,19 @@ object BacktestScreen {
             },
             matchWidth(context, topMargin = 2)
         )
+        textCol.addView(
+            TextView(context).apply {
+                text = BacktestModeLabel.compactLine(
+                    job.sample,
+                    job.initialCapital,
+                    statusLabel(job.status)
+                )
+                textSize = AltrixaDimens.textSmall
+                setTextColor(AltrixaColors.textSecondary)
+                tag = "BACKTEST_MODE_LINE"
+            },
+            matchWidth(context, topMargin = 2)
+        )
         top.addView(textCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         top.addView(altrixaStatusBadge(context, badgeText, tone))
         row.addView(top, matchWidth(context))
@@ -860,8 +936,61 @@ object BacktestScreen {
                 },
                 matchWidth(context, topMargin = AltrixaDimens.spaceSm)
             )
+
+            // Only finished tests can be deleted; a running launch is cancelled first.
+            if (onDelete != null) {
+                row.addView(
+                    TextView(context).apply {
+                        text = "Delete"
+                        textSize = AltrixaDimens.textSmall
+                        setTextColor(AltrixaColors.negative)
+                        setTypeface(typeface, Typeface.BOLD)
+                        gravity = Gravity.END
+                        tag = "BACKTEST_DELETE"
+                        setPadding(
+                            0,
+                            context.dpToPx(AltrixaDimens.spaceSm),
+                            0,
+                            context.dpToPx(AltrixaDimens.spaceXs)
+                        )
+                        isClickable = true
+                        setOnClickListener { onDelete(job.id) }
+                    },
+                    matchWidth(context)
+                )
+            }
         }
         return row
+    }
+
+    private fun statusLabel(status: BacktestJobStore.Status): String = when (status) {
+        BacktestJobStore.Status.COMPLETED -> "Completed"
+        BacktestJobStore.Status.FAILED -> "Failed"
+        BacktestJobStore.Status.CANCELLED -> "Cancelled"
+        BacktestJobStore.Status.QUEUED -> "Queued"
+        else -> "Running"
+    }
+
+    /**
+     * Destructive-action confirmation. Nothing is deleted until the user
+     * explicitly confirms. The wording distinguishes a single standard test
+     * from a whole out-of-sample run.
+     */
+    fun confirmDelete(context: Context, job: BacktestJobStore.Job, onConfirm: () -> Unit) {
+        val outOfSample = job.sample != BacktestSample.FULL
+        val title = if (outOfSample) "Delete this backtest run?" else "Delete this backtest?"
+        val message = if (outOfSample) {
+            "This will remove both In-Sample and Out-of-Sample results."
+        } else {
+            "This will permanently remove the saved test and its results."
+        }
+
+        android.app.AlertDialog.Builder(context)
+            .setTitle(title)
+            .setMessage(message)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Delete") { _, _ -> onConfirm() }
+            .show()
     }
 
     // -----------------------------------------------------------------

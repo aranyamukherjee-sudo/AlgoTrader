@@ -50,6 +50,8 @@ import java.util.concurrent.Executors
 
 import com.algotrader.backtest.BacktestConfig
 import com.algotrader.backtest.BacktestResult
+import com.algotrader.backtest.BacktestSample
+import com.algotrader.backtest.BacktestLaunchPlan
 import com.algotrader.backtest.StrategyBacktestRunner
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.app.backtest.BacktestJobStore
@@ -68,6 +70,8 @@ import com.algotrader.app.ui.screens.ExecutionScreen
 import com.algotrader.app.ui.screens.BacktestScreen
 import com.algotrader.app.ui.screens.StrategiesScreen
 import com.algotrader.app.ui.nav.AltrixaBottomNav
+import com.algotrader.app.ui.dialogs.FyersAuthDialog
+import com.algotrader.app.notification.AltrixaNotifications
 import com.algotrader.app.ui.nav.AltrixaDestination
 import com.algotrader.app.theme.AltrixaColors
 import com.algotrader.app.theme.AltrixaDimens
@@ -680,57 +684,19 @@ private var isHomeScreenActive = false
             return
         }
 
-        val input = android.widget.EditText(this).apply {
-            hint = "Paste FYERS auth code"
-            inputType =
-                android.text.InputType.TYPE_CLASS_TEXT or
-                    android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-            setSingleLine(true)
-            setPadding(40, 20, 40, 10)
-        }
-
-        val dialog = android.app.AlertDialog.Builder(this)
-            .setTitle("FYERS Authorization Code")
-            .setMessage(
-                "After FYERS login and MFA, paste the temporary auth code shown by FYERS here."
+        FyersAuthDialog(this) { authCode, authDialog ->
+            exchangeFyersAuthCode(
+                authCode = authCode,
+                state = state,
+                dialog = authDialog
             )
-            .setView(input)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Continue", null)
-            .create()
-
-        dialog.setOnShowListener {
-            val continueButton =
-                dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
-
-            continueButton.setOnClickListener {
-                val authCode = input.text?.toString()?.trim().orEmpty()
-
-                if (authCode.isBlank()) {
-                    input.error = "Auth code is required"
-                    return@setOnClickListener
-                }
-
-                continueButton.isEnabled = false
-                input.isEnabled = false
-
-                exchangeFyersAuthCode(
-                    authCode = authCode,
-                    state = state,
-                    dialog = dialog,
-                    input = input
-                )
-            }
-        }
-
-        dialog.show()
+        }.show()
     }
 
     private fun exchangeFyersAuthCode(
         authCode: String,
         state: String,
-        dialog: android.app.AlertDialog,
-        input: android.widget.EditText
+        dialog: FyersAuthDialog
     ) {
         val json = JSONObject().apply {
             put("auth_code", authCode)
@@ -754,19 +720,9 @@ private var isHomeScreenActive = false
                 e: java.io.IOException
             ) {
                 runOnUiThread {
-                    dialog.getButton(
-                        android.app.AlertDialog.BUTTON_POSITIVE
-                    )?.isEnabled = true
-
-                    dialog.getButton(
-                        android.app.AlertDialog.BUTTON_NEGATIVE
-                    )?.isEnabled = true
-
-                    android.widget.Toast.makeText(
-                        this@MainActivity,
-                        "Could not contact ALTRIXA server. Check your connection.",
-                        android.widget.Toast.LENGTH_LONG
-                    ).show()
+                    dialog.showError(
+                        "Could not contact ALTRIXA server. Check your connection."
+                    )
                 }
             }
 
@@ -789,7 +745,9 @@ private var isHomeScreenActive = false
                             fyersOAuthBrowserOpened = false
 
                             runOnUiThread {
-                                dialog.dismiss()
+                                dialog.showSuccessAndDismiss(
+                                    "FYERS authentication renewed."
+                                )
 
                                 android.widget.Toast.makeText(
                                     this@MainActivity,
@@ -814,36 +772,18 @@ private var isHomeScreenActive = false
                         }
 
                         runOnUiThread {
-                            dialog.getButton(
-                                android.app.AlertDialog.BUTTON_POSITIVE
-                            )?.isEnabled = true
-
-                            input.isEnabled = true
-
-                            android.widget.Toast.makeText(
-                                this@MainActivity,
+                            dialog.showError(
                                 if (message.isNotBlank()) {
                                     "FYERS authentication failed: $message"
                                 } else {
                                     "FYERS authentication failed."
-                                },
-                                android.widget.Toast.LENGTH_LONG
-                            ).show()
+                                }
+                            )
                         }
 
                     } catch (_: Exception) {
                         runOnUiThread {
-                            dialog.getButton(
-                                android.app.AlertDialog.BUTTON_POSITIVE
-                            )?.isEnabled = true
-
-                            input.isEnabled = true
-
-                            android.widget.Toast.makeText(
-                                this@MainActivity,
-                                "FYERS authentication failed.",
-                                android.widget.Toast.LENGTH_LONG
-                            ).show()
+                            dialog.showError("FYERS authentication failed.")
                         }
                     }
                 }
@@ -901,7 +841,9 @@ private var isHomeScreenActive = false
             this,
             FYERS_AUTH_NOTIFICATION_CHANNEL
         )
-            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setSmallIcon(R.drawable.ic_stat_altrixa)
+            .setColor(AltrixaColors.warning)
+            .setLargeIcon(AltrixaNotifications.brandLargeIcon(this))
             .setContentTitle("ALTRIXA — FYERS token expired")
             .setContentText("Open ALTRIXA to refresh FYERS authentication.")
             .setStyle(
@@ -2612,6 +2554,72 @@ private fun showBacktest() {
     renderBacktestConfiguration()
 }
 
+/**
+ * Cancels the whole logical launch the given job belongs to: every job that
+ * shares its runId (standard: all strategy jobs; OOS: every In-Sample and
+ * Out-of-Sample job). The CANCELLED state is persisted by the existing
+ * BacktestJobStore; the WorkManager requests are then cancelled so queued jobs
+ * never start and running Workers stop. Other runs are untouched.
+ *
+ * Only called from the explicit Cancel button, never from navigation.
+ */
+private fun cancelBacktestLaunch(jobId: String) {
+    val cancelledIds = backtestJobStore.cancelRun(jobId)
+
+    val workManager = WorkManager.getInstance(applicationContext)
+    cancelledIds.forEach { id ->
+        workManager.cancelUniqueWork("altrixa_backtest_$id")
+    }
+
+    backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+    renderedBacktestJobId = null
+
+    val job = backtestJobStore.get(jobId)
+    if (job != null) {
+        isBacktestScreenVisible = true
+        restoreBacktestJob(job)
+    } else {
+        activeBacktestJobId = null
+        selectedBacktestJobId = null
+        content.removeAllViews()
+        renderBacktestConfiguration()
+    }
+}
+
+/**
+ * Confirmation first; only then is the saved test (the whole logical run for
+ * runId jobs) permanently removed, and the saved-test list refreshed.
+ */
+private fun confirmAndDeleteBacktest(jobId: String) {
+    val job = backtestJobStore.get(jobId) ?: run {
+        content.removeAllViews()
+        renderBacktestConfiguration()
+        return
+    }
+
+    BacktestScreen.confirmDelete(this, job) {
+        when (val outcome = backtestJobStore.deleteRun(jobId)) {
+            is BacktestJobStore.DeleteOutcome.Deleted -> {
+                if (activeBacktestJobId in outcome.jobIds) activeBacktestJobId = null
+                if (selectedBacktestJobId in outcome.jobIds) selectedBacktestJobId = null
+                if (renderedBacktestJobId in outcome.jobIds) renderedBacktestJobId = null
+            }
+
+            BacktestJobStore.DeleteOutcome.StillActive ->
+                Toast.makeText(
+                    this,
+                    "Cancel the running backtest before deleting it.",
+                    Toast.LENGTH_LONG
+                ).show()
+
+            BacktestJobStore.DeleteOutcome.NotFound -> Unit
+        }
+
+        content.removeAllViews()
+        renderBacktestConfiguration()
+    }
+}
+
 private fun renderBacktestConfiguration() {
     BacktestScreen.renderConfig(
         this,
@@ -2636,11 +2644,11 @@ private fun renderBacktestConfiguration() {
                 "cpr_ema"
             ).map { strategyId -> factory.create(strategyId) }
         }
-    ) { configurations, capital, sizing ->
+    ) { configurations, capital, sizing, instrumentType, outOfSample ->
         selectedBacktestConfigurations = configurations
         selectedBacktestCapital = capital
         selectedBacktestSizing = sizing
-        runBacktest()
+        runBacktest(instrumentType, outOfSample)
     }
 
     // Show persisted backtests underneath the configuration screen.
@@ -2649,7 +2657,8 @@ private fun renderBacktestConfiguration() {
     BacktestScreen.renderSavedTests(
         this,
         content,
-        backtestJobStore.list()
+        backtestJobStore.list(),
+        onDeleteJob = { jobId -> confirmAndDeleteBacktest(jobId) }
     ) { jobId ->
         val job = backtestJobStore.get(jobId)
 
@@ -2694,8 +2703,107 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
                 return
             }
 
+            /*
+             * A multi-strategy launch creates one Job per strategy, all
+             * carrying the same runId. Do not render a partial comparison
+             * while sibling strategy Workers are still running.
+             *
+             * Legacy jobs have runId == null and therefore continue to
+             * restore exactly as a single-job result.
+             */
+            if (job.runId != null) {
+                val runJobs = backtestJobStore.list()
+                    .filter { it.runId == job.runId }
+
+                val terminalStatuses = setOf(
+                    BacktestJobStore.Status.COMPLETED,
+                    BacktestJobStore.Status.FAILED,
+                    BacktestJobStore.Status.CANCELLED
+                )
+
+                val runIsTerminal = runJobs.isNotEmpty() &&
+                    runJobs.all { it.status in terminalStatuses }
+
+                if (!runIsTerminal) {
+                    val completedCount = runJobs.count {
+                        it.status == BacktestJobStore.Status.COMPLETED
+                    }
+
+                    BacktestScreen.updateRunning(
+                        content,
+                        if (runJobs.isNotEmpty()) {
+                            ((completedCount * 100) / runJobs.size)
+                                .coerceAtMost(99)
+                        } else {
+                            0
+                        },
+                        "Waiting for strategies: $completedCount/${runJobs.size} complete"
+                    )
+                    return
+                }
+
+                /*
+                 * A launch the user cancelled is never presented as a
+                 * (partial) comparison, even if some of its jobs had already
+                 * completed before the cancel.
+                 */
+                if (runJobs.any { it.status == BacktestJobStore.Status.CANCELLED }) {
+                    renderedBacktestJobId = job.id
+                    renderBacktestFailure(
+                        "This backtest was cancelled before it finished.",
+                        "Backtest cancelled"
+                    )
+                    return
+                }
+
+                /*
+                 * An out-of-sample run is only meaningful when every
+                 * in-sample and out-of-sample job completed. Do not present a
+                 * partial IS/OOS comparison as if it were complete.
+                 */
+                val didNotComplete = runJobs.count {
+                    it.status != BacktestJobStore.Status.COMPLETED
+                }
+
+                if (
+                    runJobs.any { it.sample != BacktestSample.FULL } &&
+                    didNotComplete > 0
+                ) {
+                    renderedBacktestJobId = job.id
+                    content.removeAllViews()
+
+                    BacktestScreen.renderError(
+                        this,
+                        content,
+                        message = "Incomplete OOS run \u2014 $didNotComplete of " +
+                            "${runJobs.size} jobs did not complete.",
+                        title = "Incomplete OOS run",
+                        detail = "Out-of-sample results are shown only when every " +
+                            "in-sample and out-of-sample job has completed."
+                    ) {
+                        activeBacktestJobId = null
+                        renderedBacktestJobId = null
+                        renderBacktestConfiguration()
+                    }
+
+                    return
+                }
+            }
+
             val results = try {
-                backtestJobStore.getResults(job.id)
+                val runJobs = if (job.runId != null) {
+                    backtestJobStore.list()
+                        .filter { it.runId == job.runId }
+                        .sortedBy { it.createdAt }
+                } else {
+                    listOf(job)
+                }
+
+                runJobs
+                    .filter { it.status == BacktestJobStore.Status.COMPLETED }
+                    .flatMap { runJob ->
+                        backtestJobStore.getResults(runJob.id)
+                    }
             } catch (e: Exception) {
                 content.removeAllViews()
 
@@ -2717,7 +2825,8 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
 
             android.util.Log.i(
                 "ALTRIXA_BACKTEST",
-                "RESTORE_TEST job=${job.id} status=${job.status} results=${results.size}"
+                "RESTORE_TEST job=${job.id} runId=${job.runId} " +
+                    "status=${job.status} results=${results.size}"
             )
 
             if (results.isNotEmpty()) {
@@ -2729,7 +2838,19 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
                     content,
                     instrumentName = BacktestFormat.instrumentName(job.instrumentSymbol),
                     timeframe = timeframeLabel(job.timeframe),
-                    candleCount = job.candleCount,
+                    candleCount = if (
+                        job.runId != null && job.sample != BacktestSample.FULL
+                    ) {
+                        // An OOS launch splits one candle set across its jobs:
+                        // report the total, not this job's segment.
+                        backtestJobStore.list()
+                            .filter { it.runId == job.runId }
+                            .groupBy { it.sample }
+                            .values
+                            .sumOf { it.first().candleCount }
+                    } else {
+                        job.candleCount
+                    },
                     initialCapital = job.initialCapital,
                     positionSizing = job.positionSizing,
                     results = results,
@@ -2742,29 +2863,19 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
             } else {
                 content.removeAllViews()
 
-                val diagnostic = TextView(this).apply {
-                    text = "RESTORE TEST\\n\\n" +
-                        "Job ID: ${job.id}\\n" +
-                        "Status: ${job.status}\\n" +
-                        "Results loaded: ${results.size}\\n\\n" +
+                BacktestScreen.renderError(
+                    this,
+                    content,
+                    message = "This backtest finished, but no results were stored for it.",
+                    title = "Results unavailable",
+                    detail = "Job ID: ${job.id}\nStatus: ${job.status}\n" +
+                        "Results loaded: ${results.size}\n\n" +
                         backtestJobStore.debugResultsStorage(job.id)
-                    textSize = 14f
-                    setTextColor(AltrixaColors.textPrimary)
-                    setPadding(
-                        dp(16),
-                        dp(24),
-                        dp(16),
-                        dp(24)
-                    )
+                ) {
+                    activeBacktestJobId = null
+                    renderedBacktestJobId = null
+                    renderBacktestConfiguration()
                 }
-
-                content.addView(
-                    diagnostic,
-                    LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    )
-                )
             }
         }
 
@@ -2786,39 +2897,26 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
 
             renderedBacktestJobId = job.id
             renderBacktestFailure(
-                "Backtest was cancelled."
+                "This backtest was cancelled before it finished.",
+                "Backtest cancelled"
             )
         }
 
         else -> {
             renderedBacktestJobId = null
 
+            content.removeAllViews()
+
             BacktestScreen.renderRunning(
                 this,
                 content,
-                instrumentName = job.instrumentSymbol,
+                instrumentName = BacktestFormat.instrumentName(job.instrumentSymbol),
                 timeframe = timeframeLabel(job.timeframe),
                 candleCount = job.candleCount,
-                strategies = strategies
-            )
-
-            content.addView(
-                TextView(this).apply {
-                    text = "Progress: ${job.progress}% · ${job.currentStep}"
-                    textSize = 14f
-                    setTextColor(AltrixaColors.textSecondary)
-                    setPadding(
-                        0,
-                        dp(AltrixaDimens.spaceSm),
-                        0,
-                        dp(AltrixaDimens.spaceSm)
-                    )
-                    tag = "BACKTEST_PROGRESS"
-                },
-                LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
+                strategies = strategies,
+                progress = job.progress,
+                currentStep = job.currentStep,
+                onCancel = { cancelBacktestLaunch(job.id) }
             )
         }
     }
@@ -2828,30 +2926,7 @@ private fun addBacktestProgressView(
     progress: Int,
     currentStep: String
 ) {
-    content.findViewWithTag<TextView>(
-        "BACKTEST_PROGRESS"
-    )?.let { existing ->
-        content.removeView(existing)
-    }
-
-    content.addView(
-        TextView(this).apply {
-            text = "Progress: ${progress.coerceIn(0, 100)}% · $currentStep"
-            textSize = 14f
-            setTextColor(AltrixaColors.textSecondary)
-            setPadding(
-                0,
-                dp(AltrixaDimens.spaceSm),
-                0,
-                dp(AltrixaDimens.spaceSm)
-            )
-            tag = "BACKTEST_PROGRESS"
-        },
-        LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        )
-    )
+    BacktestScreen.updateRunning(content, progress, currentStep)
 }
 
 private fun refreshBacktestJob(jobId: String) {
@@ -2860,7 +2935,52 @@ private fun refreshBacktestJob(jobId: String) {
     val job = backtestJobStore.get(jobId) ?: return
 
     when (job.status) {
-        BacktestJobStore.Status.COMPLETED,
+        BacktestJobStore.Status.COMPLETED -> {
+            /*
+             * A completed strategy does not necessarily mean the whole
+             * multi-strategy run is finished. Keep polling until every
+             * sibling job is terminal so the results screen receives the
+             * complete comparison set.
+             */
+            if (job.runId != null) {
+                val runJobs = backtestJobStore.list()
+                    .filter { it.runId == job.runId }
+
+                val terminalStatuses = setOf(
+                    BacktestJobStore.Status.COMPLETED,
+                    BacktestJobStore.Status.FAILED,
+                    BacktestJobStore.Status.CANCELLED
+                )
+
+                val runIsTerminal = runJobs.isNotEmpty() &&
+                    runJobs.all { it.status in terminalStatuses }
+
+                if (!runIsTerminal) {
+                    val completedCount = runJobs.count {
+                        it.status == BacktestJobStore.Status.COMPLETED
+                    }
+
+                    val progress = if (runJobs.isNotEmpty()) {
+                        ((completedCount * 100) / runJobs.size)
+                            .coerceAtMost(99)
+                    } else {
+                        0
+                    }
+
+                    BacktestScreen.updateRunning(
+                        content,
+                        progress,
+                        "Waiting for strategies: $completedCount/${runJobs.size} complete"
+                    )
+                    return
+                }
+            }
+
+            backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
+            isBacktestScreenVisible = true
+            restoreBacktestJob(job)
+        }
+
         BacktestJobStore.Status.FAILED,
         BacktestJobStore.Status.CANCELLED -> {
             backtestProgressHandler.removeCallbacks(backtestProgressRunnable)
@@ -2869,23 +2989,26 @@ private fun refreshBacktestJob(jobId: String) {
         }
 
         else -> {
-            val progressView = content.findViewWithTag<TextView>(
-                "BACKTEST_PROGRESS"
+            BacktestScreen.updateRunning(
+                content,
+                job.progress,
+                job.currentStep
             )
-
-            progressView?.text =
-                "Progress: ${job.progress}% · ${job.currentStep}"
         }
     }
 }
 
-private fun renderBacktestFailure(message: String) {
+private fun renderBacktestFailure(
+    message: String,
+    title: String = "Backtest failed"
+) {
     content.removeAllViews()
 
     BacktestScreen.renderError(
         this,
         content,
-        message
+        message,
+        title
     ) {
         activeBacktestJobId = null
         renderedBacktestJobId = null
@@ -2910,12 +3033,15 @@ private fun timeframeLabel(
 
 private fun runBacktest(
     instrumentType: com.algotrader.app.backtest.BacktestInstrumentType =
-        com.algotrader.app.backtest.BacktestInstrumentType.INDEX
+        com.algotrader.app.backtest.BacktestInstrumentType.INDEX,
+    outOfSample: Boolean = false
 ) {
     if (instrumentType == com.algotrader.app.backtest.BacktestInstrumentType.FUTURES) {
         Toast.makeText(
             this,
-            "Futures backtesting is not available yet. Real futures candles are required.",
+            "Futures backtesting is not available yet. " +
+"A real futures contract and futures historical candles are required. " +
+"Index candles will not be substituted.",
             Toast.LENGTH_LONG
         ).show()
         return
@@ -2993,9 +3119,45 @@ private fun runBacktest(
         else -> com.algotrader.domain.Timeframe.MINUTE_5
     }
 
+    /*
+     * Each unit of work is one Job: one strategy on one candle set.
+     *
+     * Standard mode: one FULL unit per strategy, on all candles (unchanged).
+     *
+     * Out-of-sample mode: per strategy, one IN_SAMPLE unit that receives ONLY
+     * the first 70% of the candles and one OUT_OF_SAMPLE unit that receives
+     * ONLY the final 30%. The split is chronological, requires strictly
+     * increasing timestamps, and is rejected here, before any Job is created
+     * or any candle is saved, if the data does not qualify.
+     */
+    val workUnits = when (
+        val plan = BacktestLaunchPlan.plan(
+            selectedBacktestConfigurations,
+            domainCandles,
+            outOfSample
+        )
+    ) {
+        is BacktestLaunchPlan.Outcome.Rejected -> {
+            Toast.makeText(this, plan.reason, Toast.LENGTH_LONG).show()
+            return
+        }
+
+        is BacktestLaunchPlan.Outcome.Planned -> plan.units
+    }
+
     try {
         val workManager = WorkManager.getInstance(applicationContext)
         val factory = StrategyFactory()
+
+        /*
+         * All strategies selected in one Backtest launch share a durable
+         * runId. Each strategy still remains an independent Job/Worker.
+         *
+         * This lets the results screen reconstruct the complete strategy
+         * comparison without relying on timestamps, strategy names, or
+         * other heuristics.
+         */
+        val backtestRunId = java.util.UUID.randomUUID().toString()
 
         /*
          * One selected strategy = one persisted Job + one WorkManager task.
@@ -3008,17 +3170,23 @@ private fun runBacktest(
          * - WorkManager work ID
          * - unique WorkManager name
          */
-        val jobs = selectedBacktestConfigurations.map { configuration ->
+        val jobs = workUnits.map { unit ->
+            val configuration = unit.configuration
+
             val job = backtestJobStore.create(
                 instrument = instrument,
                 timeframe = timeframe,
                 strategies = listOf(configuration),
                 initialCapital = selectedBacktestCapital,
                 positionSizing = selectedBacktestSizing,
-                candleCount = domainCandles.size
+                candleCount = unit.candles.size,
+                runId = backtestRunId,
+                sample = unit.sample
             )
 
-            backtestJobStore.saveCandles(job.id, domainCandles)
+            // Only this unit's own candles are persisted for the job, so an
+            // in-sample job can never read out-of-sample candles (and vice versa).
+            backtestJobStore.saveCandles(job.id, unit.candles)
 
             val request = OneTimeWorkRequestBuilder<BacktestWorker>()
                 .setInputData(
@@ -3043,6 +3211,7 @@ private fun runBacktest(
                 "ALTRIXA_BACKTEST",
                 "Queued independent backtest: " +
                     "job=${job.id}, strategy=${configuration.strategyId}, " +
+                    "sample=${unit.sample}, candles=${unit.candles.size}, " +
                     "workId=${request.id}"
             )
 
@@ -3076,7 +3245,8 @@ private fun runBacktest(
             instrumentName = selectedInstrument.displayName,
             timeframe = selectedTimeframe,
             candleCount = domainCandles.size,
-            strategies = listOf(firstStrategy)
+            strategies = listOf(firstStrategy),
+            onCancel = { cancelBacktestLaunch(firstJob.id) }
         )
 
         addBacktestProgressView(
