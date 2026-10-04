@@ -3,6 +3,7 @@ import asyncio
 import threading
 import time
 import requests
+import re
 import secrets
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,11 @@ SYMBOLS = [
     "NSE:NIFTYBANK-INDEX",
     "BSE:SENSEX-INDEX",
 ]
+
+# Dynamic futures subscriptions requested by the Android Home chart.
+# The base index symbols above remain permanently subscribed.
+futures_subscriptions = set()
+futures_subscriptions_lock = threading.Lock()
 
 latest_quotes = {}
 lock = threading.Lock()
@@ -157,12 +163,17 @@ def on_open():
 
     print("FYERS WebSocket connected", flush=True)
 
+    with futures_subscriptions_lock:
+        dynamic_symbols = sorted(futures_subscriptions)
+
+    subscribed_symbols = list(dict.fromkeys(SYMBOLS + dynamic_symbols))
+
     socket.subscribe(
-        symbols=SYMBOLS,
+        symbols=subscribed_symbols,
         data_type="SymbolUpdate",
     )
 
-    print("Subscribed:", SYMBOLS, flush=True)
+    print("Subscribed:", subscribed_symbols, flush=True)
 
     socket.keep_running()
 
@@ -1309,6 +1320,50 @@ def history(
             "status": "error",
             "message": str(error),
         }
+
+
+@app.get("/futures/subscribe")
+def subscribe_futures(symbol: str):
+    """
+    Add one exact FYERS futures contract to the running market-data
+    WebSocket subscription.
+
+    Android obtains the symbol from /futures/chain first. This endpoint
+    deliberately accepts only NSE NIFTY futures symbols matching the
+    FYERS contract naming convention; it never constructs a contract.
+    """
+    global socket
+
+    normalized = symbol.strip().upper()
+
+    if not re.fullmatch(r"NSE:NIFTY\d{2}(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)FUT", normalized):
+        return {
+            "status": "error",
+            "message": "Invalid NIFTY futures contract symbol",
+        }
+
+    with futures_subscriptions_lock:
+        futures_subscriptions.add(normalized)
+
+    current_socket = socket
+
+    if current_socket is not None:
+        try:
+            current_socket.subscribe(
+                symbols=[normalized],
+                data_type="SymbolUpdate",
+            )
+        except Exception as error:
+            return {
+                "status": "error",
+                "message": f"Futures subscription failed: {error}",
+            }
+
+    return {
+        "status": "ok",
+        "symbol": normalized,
+        "subscribed": True,
+    }
 
 
 @app.get("/quotes")
