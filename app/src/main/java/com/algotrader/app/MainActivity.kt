@@ -105,7 +105,18 @@ data class InstrumentInfo(
     val lotSize: Int = 1,
     val isFutures: Boolean = false,
     val underlyingSymbol: String? = null,
-    val expiryEpochSeconds: Long? = null
+    val expiryEpochSeconds: Long? = null,
+    /**
+     * Authoritative contract size (units per lot) of THIS futures contract,
+     * or null when unknown. Null is the real state of every discovered
+     * futures contract until an authoritative source supplies a value.
+     *
+     * For futures, [lotSize] is NOT a contract size: it is a placeholder (1)
+     * and must never be used for backtest accounting. Futures backtests use
+     * only this field, and refuse to run while it is null. It is never copied
+     * from an index's [lotSize].
+     */
+    val contractLotSize: Int? = null
 )
 
 object Instruments {
@@ -449,7 +460,10 @@ private var isHomeScreenActive = false
                                     displayName = "NIFTY FUT",
                                     backendSymbol = symbol,
                                     // Exact futures lot size is deliberately
-                                    // not inferred from the chain.
+                                    // not inferred from the chain. `lotSize`
+                                    // stays a non-accounting placeholder;
+                                    // `contractLotSize` stays null (unknown)
+                                    // until an authoritative source exists.
                                     lotSize = 1,
                                     isFutures = true,
                                     underlyingSymbol = "NSE:NIFTY50-INDEX",
@@ -2872,6 +2886,27 @@ private fun confirmAndDeleteBacktest(jobId: String) {
     }
 }
 
+private fun futuresBacktestResolution() =
+    com.algotrader.app.backtest.BacktestInstrumentResolver.resolve(
+        com.algotrader.app.backtest.BacktestInstrumentType.FUTURES,
+        selectedInstrument,
+        selectedFuturesContract
+    )
+
+private fun futuresBacktestReady(): Boolean =
+    futuresBacktestResolution() is
+        com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Resolved
+
+private fun futuresBacktestNote(): String =
+    when (val r = futuresBacktestResolution()) {
+        is com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Rejected ->
+            r.reason
+
+        is com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Resolved ->
+            "Contract ${r.instrument.backendSymbol} \u00b7 1 lot = ${r.lotSize} units. " +
+                "Uses futures candles; index candles are never substituted."
+    }
+
 private fun renderBacktestConfiguration() {
     BacktestScreen.renderConfig(
         this,
@@ -2883,8 +2918,16 @@ private fun renderBacktestConfiguration() {
         ]?.size ?: 0,
         initialCapital = 100_000.0,
         positionQuantity = 1.0,
-        lotSize = selectedInstrument.lotSize,
+        // For a selected futures contract the lot-size input is its authoritative
+        // contract size (null -> 1 -> unit mode); its placeholder lotSize is never used.
+        lotSize = if (selectedInstrument.isFutures) {
+            selectedInstrument.contractLotSize ?: 1
+        } else {
+            selectedInstrument.lotSize
+        },
         instrumentType = com.algotrader.app.backtest.BacktestInstrumentType.INDEX,
+        futuresNote = futuresBacktestNote(),
+        futuresReady = futuresBacktestReady(),
         strategies = StrategyFactory().let { factory ->
             listOf(
                 "moving_average_crossover",
@@ -3288,25 +3331,55 @@ private fun runBacktest(
         com.algotrader.app.backtest.BacktestInstrumentType.INDEX,
     outOfSample: Boolean = false
 ) {
-    if (instrumentType == com.algotrader.app.backtest.BacktestInstrumentType.FUTURES) {
+    /*
+     * Phase 3 Patch 6: the instrument, candle source and accounting lot size
+     * are decided by one pure resolver. INDEX behaves exactly as before (the
+     * selected index, its index candles, its index lot size). FUTURES uses the
+     * exact contract discovered by Patch 5, its futures candles (loaded through
+     * /futures/history), and only its authoritative contract lot size; it is
+     * refused while that lot size is unknown.
+     */
+    val resolved = when (
+        val resolution = com.algotrader.app.backtest.BacktestInstrumentResolver.resolve(
+            instrumentType,
+            selectedInstrument,
+            selectedFuturesContract
+        )
+    ) {
+        is com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Rejected -> {
+            Toast.makeText(this, resolution.reason, Toast.LENGTH_LONG).show()
+            return
+        }
+
+        is com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Resolved ->
+            resolution
+    }
+    val backtestInstrument = resolved.instrument
+
+    if (resolved.type == com.algotrader.app.backtest.BacktestInstrumentType.FUTURES &&
+        selectedBacktestSizing !is PositionSizing.FixedLots
+    ) {
         Toast.makeText(
             this,
-            "Futures backtesting is not available yet. " +
-"A real futures contract and futures historical candles are required. " +
-"Index candles will not be substituted.",
+            "Futures are traded in whole lots. Set the position size in lots.",
             Toast.LENGTH_LONG
         ).show()
         return
     }
 
     val uiCandles = candlesByInstrument[
-        "${selectedInstrument.backendSymbol}|$selectedTimeframe"
+        "${backtestInstrument.backendSymbol}|$selectedTimeframe"
     ]
 
     if (uiCandles.isNullOrEmpty()) {
         Toast.makeText(
             this,
-            "Historical data is not loaded yet. Open Home first and wait for candles.",
+            if (resolved.type == com.algotrader.app.backtest.BacktestInstrumentType.FUTURES) {
+                "Futures candles are not loaded yet. Select the futures contract " +
+                    "on Home and wait for candles."
+            } else {
+                "Historical data is not loaded yet. Open Home first and wait for candles."
+            },
             Toast.LENGTH_LONG
         ).show()
         return
@@ -3316,8 +3389,8 @@ private fun runBacktest(
         try {
             com.algotrader.domain.Candle(
                 instrument = com.algotrader.domain.Instrument(
-                    symbol = selectedInstrument.backendSymbol,
-                    exchange = selectedInstrument.backendSymbol.substringBefore(":")
+                    symbol = backtestInstrument.backendSymbol,
+                    exchange = backtestInstrument.backendSymbol.substringBefore(":")
                 ),
                 timeframe = when (selectedTimeframe) {
                     "5m" -> com.algotrader.domain.Timeframe.MINUTE_5
@@ -3358,8 +3431,8 @@ private fun runBacktest(
     }
 
     val instrument = com.algotrader.domain.Instrument(
-        symbol = selectedInstrument.backendSymbol,
-        exchange = selectedInstrument.backendSymbol.substringBefore(":")
+        symbol = backtestInstrument.backendSymbol,
+        exchange = backtestInstrument.backendSymbol.substringBefore(":")
     )
 
     val timeframe = when (selectedTimeframe) {
@@ -3432,6 +3505,8 @@ private fun runBacktest(
                 initialCapital = selectedBacktestCapital,
                 positionSizing = selectedBacktestSizing,
                 candleCount = unit.candles.size,
+                instrumentType = resolved.type,
+                futuresContract = resolved.futuresContract,
                 runId = backtestRunId,
                 sample = unit.sample
             )
@@ -3494,7 +3569,7 @@ private fun runBacktest(
         BacktestScreen.renderRunning(
             this,
             content,
-            instrumentName = selectedInstrument.displayName,
+            instrumentName = backtestInstrument.displayName,
             timeframe = selectedTimeframe,
             candleCount = domainCandles.size,
             strategies = listOf(firstStrategy),

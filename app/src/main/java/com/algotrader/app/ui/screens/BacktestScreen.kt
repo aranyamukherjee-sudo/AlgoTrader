@@ -85,6 +85,10 @@ object BacktestScreen {
         strategies: List<Strategy>,
         lotSize: Int = 1,
         instrumentType: BacktestInstrumentType = BacktestInstrumentType.INDEX,
+        /** Status line for the FUTURES option (contract, lot size, or why it cannot run). */
+        futuresNote: String = "Select a futures contract on Home to run a futures backtest.",
+        /** True only when the futures contract and its authoritative lot size are available. */
+        futuresReady: Boolean = false,
         onRunBacktest: (
             List<StrategyConfiguration>,
             Double,
@@ -145,10 +149,8 @@ object BacktestScreen {
                 instrumentTypeCard.addView(
                     altrixaBanner(
                         context,
-                        "Futures backtesting is not available yet. " +
-                            "A real futures contract and futures historical candles are required. " +
-                            "Index candles will not be substituted.",
-                        AltrixaTone.WARNING
+                        futuresNote,
+                        if (futuresReady) AltrixaTone.POSITIVE else AltrixaTone.WARNING
                     ),
                     matchWidth(context, topMargin = AltrixaDimens.spaceMd)
                 )
@@ -174,13 +176,11 @@ object BacktestScreen {
             altrixaBanner(
                 context,
                 if (selectedInstrumentType == BacktestInstrumentType.FUTURES) {
-                    "Futures backtesting is not available yet. " +
-                        "A real futures contract and futures historical candles are required. " +
-                        "Index candles will not be substituted."
+                    futuresNote
                 } else {
                     "Index backtests use the loaded index market-data candles."
                 },
-                if (selectedInstrumentType == BacktestInstrumentType.FUTURES) {
+                if (selectedInstrumentType == BacktestInstrumentType.FUTURES && !futuresReady) {
                     AltrixaTone.WARNING
                 } else {
                     AltrixaTone.POSITIVE

@@ -87,7 +87,11 @@ class BacktestWorker(
             val config = BacktestConfig(
                 initialCapital = job.initialCapital,
                 positionSizing = job.positionSizing,
-                lotSize = BacktestFormat.lotSizeFor(job.instrumentSymbol)
+                lotSize = BacktestInstrumentResolver.engineLotSize(
+                    job.instrumentType,
+                    job.instrumentSymbol,
+                    job.futuresContract
+                )
             )
 
             val checkpoint = store.getCheckpoint(jobId)

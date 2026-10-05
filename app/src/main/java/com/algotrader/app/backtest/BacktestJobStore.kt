@@ -62,7 +62,9 @@ data class FuturesContractConfig(
     val contractMonth: String? = null,
     val expiry: String? = null,
     val contractId: String? = null,
-    val lotSize: Int? = null
+    val lotSize: Int? = null,
+    /** Expiry exactly as returned by the FYERS futures chain (epoch seconds); null if not supplied. */
+    val expiryEpochSeconds: Long? = null
 )
 
 class BacktestJobStore internal constructor(
@@ -888,6 +890,7 @@ class BacktestJobStore internal constructor(
                     contract.expiry?.let { put("expiry", it) }
                     contract.contractId?.let { put("contractId", it) }
                     contract.lotSize?.let { put("lotSize", it) }
+                    contract.expiryEpochSeconds?.let { put("expiryEpochSeconds", it) }
                 })
             }
 
@@ -947,7 +950,13 @@ class BacktestJobStore internal constructor(
                         contract.optInt("lotSize", 0).takeIf { it > 0 }
                     } else {
                         null
-                    }
+                    },
+                    expiryEpochSeconds =
+                        if (contract.has("expiryEpochSeconds") && !contract.isNull("expiryEpochSeconds")) {
+                            contract.optLong("expiryEpochSeconds", 0L).takeIf { it > 0L }
+                        } else {
+                            null
+                        }
                 )
             },
 

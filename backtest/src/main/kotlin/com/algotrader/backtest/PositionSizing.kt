@@ -47,7 +47,7 @@ sealed interface PositionSizing {
 
     /**
      * Always trade a fixed whole number of lots. Quantity is `lots x lotSize`
-     * (so 1 lot of NIFTY futures at lot size 65 is 65 units). For a
+     * (so 1 lot at lot size 65 is 65 units). For a
      * single-unit instrument (`lotSize == 1`) a lot is one unit.
      */
     data class FixedLots(val lots: Int) : PositionSizing {
