@@ -347,19 +347,19 @@ class FuturesCalculatorTest {
     // ---- 13. unknown expiry / date ---------------------------------------------------------------------------------------
 
     @Test
-    fun `13 unknown expiry preserves supplied margin but prevents leverage matching`() {
+    fun `13 unknown expiry still preserves the supplied margin quote`() {
         val inputs = marginInputs(MarginQuote(bd("100000"))).copy(expiry = Input.Unknown)
         val c = FuturesCalculator.calculate(inputs)
-        // A supplied margin quote remains available even when contract identity
-        // is incomplete. Missing expiry only prevents scenario matching for leverage.
+        // A supplied margin quote is not a lookup: it remains available, unchanged,
+        // even when contract identity or expiry is incomplete (§8.2a, I15).
         assertValue("100000", c.marginRequirement)
         assertEquals(ResultKind.SUPPLIED, c.marginRequirement.kind)
-        assertNull(c.effectiveLeverage.value)
-        assertEquals(ResultKind.NOT_MODELLED, c.effectiveLeverage.kind)
-        assertTrue(InputId.MARGIN in c.effectiveLeverage.dependsOn)
+        assertValue("100000", c.capitalUsed)
         // C2-C6 are unaffected by expiry (§8.2a).
         assertEquals(65L, c.quantity.value)
         assertValue("1463800", c.contractNotional)
+        // Whether an unknown expiry blocks leverage is proved by test 14c, which
+        // uses a fully matching margin scenario. This quote has an empty scenario.
     }
 
     @Test
@@ -402,16 +402,17 @@ class FuturesCalculatorTest {
         assertTrue(outputs.none { it.value != null && it.value!!.setScale(2, RoundingMode.HALF_UP).compareTo(bd("8.83")) == 0 })
     }
 
+    // A margin scenario that matches marginInputs(): 65 units, BUY (LONG opens with BUY), NRML, `day`, REFERENCE_PRICE.
+    private fun scenario(
+        qty: Long = 65,
+        side: Side = Side.BUY,
+        product: ProductType = ProductType.NRML,
+        date: LocalDate = day,
+        basis: ValuationBasis = ValuationBasis.REFERENCE_PRICE,
+    ) = MarginScenario(Input.Known(qty), Input.Known(side), Input.Known(product), Input.Known(date), Input.Known(basis))
+
     @Test
     fun `14b leverage needs a fully supplied matching scenario`() {
-        fun scenario(
-            qty: Long = 65,
-            side: Side = Side.BUY,
-            product: ProductType = ProductType.NRML,
-            date: LocalDate = day,
-            basis: ValuationBasis = ValuationBasis.REFERENCE_PRICE,
-        ) = MarginScenario(Input.Known(qty), Input.Known(side), Input.Known(product), Input.Known(date), Input.Known(basis))
-
         // Synthetic numbers: notional 1,463,800 / margin 146,380 = 10.
         val ok = FuturesCalculator.calculate(marginInputs(MarginQuote(bd("146380"), scenario())))
         assertValue("10", ok.effectiveLeverage)
@@ -434,6 +435,111 @@ class FuturesCalculatorTest {
         // A partially supplied scenario is not enough.
         val partial = MarginScenario(quantity = Input.Known(65), side = Input.Known(Side.BUY))
         assertNull(FuturesCalculator.calculate(marginInputs(MarginQuote(bd("146380"), partial))).effectiveLeverage.value)
+    }
+
+    // ---- C9 precondition: contract identity (I1-I5, I7) and expiry (I6), §8.2a / §8.3 ------------------------------
+    // 14b above is the fully valid regression: identity and expiry known, scenario matching -> DERIVED leverage 10.
+
+    /** Identity, expiry and a fully matching margin scenario are all supplied; synthetic margin 146,380 gives 10x. */
+    private fun matchingLeverageInputs() = marginInputs(MarginQuote(bd("146380"), scenario())).copy(
+        entryPrice = known("22520"),
+        exitPrice = known("22600"),
+    )
+
+    /** What an unknown or blank identity/expiry must NOT change: supplied margin, capital used, quantity, values and P&L. */
+    private fun assertMarginAndArithmeticUnchanged(control: FuturesCalculation, c: FuturesCalculation) {
+        assertValue("146380", c.marginRequirement)
+        assertEquals(ResultKind.SUPPLIED, c.marginRequirement.kind)
+        assertEquals(control.marginRequirement, c.marginRequirement)
+        assertEquals(control.capitalUsed, c.capitalUsed)
+        assertEquals(control.quantity, c.quantity)
+        assertEquals(control.entryValue, c.entryValue)
+        assertEquals(control.contractNotional, c.contractNotional)
+        assertEquals(control.grossPnl, c.grossPnl)
+        assertValue("5200", c.grossPnl) // (22600 - 22520) x 65, still exact
+    }
+
+    @Test
+    fun `14c unknown expiry prevents leverage while preserving the supplied margin`() {
+        val control = FuturesCalculator.calculate(matchingLeverageInputs())
+        assertValue("10", control.effectiveLeverage) // expiry known: leverage is produced
+
+        val c = FuturesCalculator.calculate(matchingLeverageInputs().copy(expiry = Input.Unknown))
+        assertNotModelled(c.effectiveLeverage, InputId.EXPIRY)
+        assertTrue(InputId.MARGIN in c.effectiveLeverage.dependsOn)
+        assertMarginAndArithmeticUnchanged(control, c)
+    }
+
+    @Test
+    fun `14d each unknown identity field individually prevents leverage and is the only missing input`() {
+        val base = matchingLeverageInputs()
+        val control = FuturesCalculator.calculate(base)
+        assertValue("10", control.effectiveLeverage)
+
+        val cases = listOf(
+            InputId.BROKER to base.copy(broker = Input.Unknown),
+            InputId.EXCHANGE to base.copy(exchange = Input.Unknown),
+            InputId.SEGMENT to base.copy(segment = Input.Unknown),
+            InputId.UNDERLYING to base.copy(underlying = Input.Unknown),
+            InputId.CONTRACT_MONTH to base.copy(contractMonth = Input.Unknown),
+            InputId.EXPIRY to base.copy(expiry = Input.Unknown),
+            InputId.CONTRACT_ID to base.copy(contractId = Input.Unknown),
+        )
+        for ((id, inputs) in cases) {
+            val c = FuturesCalculator.calculate(inputs)
+            assertNull(c.effectiveLeverage.value, "unknown $id must prevent leverage")
+            assertEquals(ResultKind.NOT_MODELLED, c.effectiveLeverage.kind, "kind for unknown $id")
+            assertEquals(setOf(id), c.effectiveLeverage.missingInputs, "missing inputs for unknown $id")
+            assertMarginAndArithmeticUnchanged(control, c)
+        }
+    }
+
+    @Test
+    fun `14e several unknown identity fields report every missing input`() {
+        val base = matchingLeverageInputs()
+        val control = FuturesCalculator.calculate(base)
+
+        val some = FuturesCalculator.calculate(
+            base.copy(broker = Input.Unknown, underlying = Input.Unknown, contractId = Input.Unknown, expiry = Input.Unknown),
+        )
+        assertNotModelled(some.effectiveLeverage, InputId.BROKER, InputId.UNDERLYING, InputId.CONTRACT_ID, InputId.EXPIRY)
+        assertMarginAndArithmeticUnchanged(control, some)
+
+        val all = FuturesCalculator.calculate(
+            base.copy(
+                broker = Input.Unknown, exchange = Input.Unknown, segment = Input.Unknown, underlying = Input.Unknown,
+                contractMonth = Input.Unknown, expiry = Input.Unknown, contractId = Input.Unknown,
+            ),
+        )
+        assertNotModelled(
+            all.effectiveLeverage,
+            InputId.BROKER, InputId.EXCHANGE, InputId.SEGMENT, InputId.UNDERLYING,
+            InputId.CONTRACT_MONTH, InputId.EXPIRY, InputId.CONTRACT_ID,
+        )
+        assertMarginAndArithmeticUnchanged(control, all)
+    }
+
+    @Test
+    fun `14f a blank identity field is INVALID_INPUT for leverage and leaves the margin untouched`() {
+        val base = matchingLeverageInputs()
+        val control = FuturesCalculator.calculate(base)
+        assertValue("10", control.effectiveLeverage)
+
+        val cases = listOf(
+            InputId.BROKER to base.copy(broker = Input.Known("")),
+            InputId.EXCHANGE to base.copy(exchange = Input.Known("   ")),
+            InputId.SEGMENT to base.copy(segment = Input.Known(" ")),
+            InputId.UNDERLYING to base.copy(underlying = Input.Known("")),
+            InputId.CONTRACT_MONTH to base.copy(contractMonth = Input.Known("\t")),
+            InputId.CONTRACT_ID to base.copy(contractId = Input.Known("")),
+        )
+        for ((id, inputs) in cases) {
+            val c = FuturesCalculator.calculate(inputs)
+            assertNull(c.effectiveLeverage.value, "blank $id must not give leverage")
+            assertEquals(ResultKind.INVALID_INPUT, c.effectiveLeverage.kind, "kind for blank $id")
+            assertEquals(setOf(id), c.effectiveLeverage.invalidInputs, "invalid inputs for blank $id")
+            assertMarginAndArithmeticUnchanged(control, c)
+        }
     }
 
     // ---- 15. valid gross P&L ---------------------------------------------------------------------------------------------------

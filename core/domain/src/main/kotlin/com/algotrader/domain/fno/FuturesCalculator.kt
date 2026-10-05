@@ -187,8 +187,8 @@ object FuturesCalculator {
         val net = derive(listOf(gross, roundTrip)) { gross.requireValue().subtract(roundTrip.requireValue()) }
 
         // ---- margin (I15) and leverage (C9) ---------------------------------
-        val margin = suppliedMargin(i, contract, productR)
-        val leverage = leverage(i, notional, margin, quantity, openingSide, productR, dateR, valR)
+        val margin = suppliedMargin(i)
+        val leverage = leverage(i, contract, notional, margin, quantity, openingSide, productR, dateR, valR)
 
         return FuturesCalculation(
             openingSide = openingSide,
@@ -275,14 +275,11 @@ object FuturesCalculator {
     }
 
     /**
-     * I15 as supplied. Needs contract identity including expiry (§8.2a: contract-specific
-     * lookups), the position's product (I14) and the quote. Never computed from notional.
+     * I15 as supplied: only the quote itself is required, and it must be valid (> 0).
+     * Contract identity, expiry and product are NOT required here (§8.2a, I15); they
+     * are preconditions of leverage only (see [leverage]). Never computed from notional.
      */
-    private fun suppliedMargin(
-        i: FuturesInputs,
-        contract: FnoResult<Unit>,
-        productR: FnoResult<ProductType>,
-    ): FnoResult<BigDecimal> {
+    private fun suppliedMargin(i: FuturesInputs): FnoResult<BigDecimal> {
         // I15 is a supplied broker quote. Identity/expiry/product completeness
         // is required for leverage scenario matching, but must not prevent a
         // supplied margin quote from being preserved unchanged.
@@ -309,9 +306,16 @@ object FuturesCalculator {
         )
     }
 
-    /** C9: notional / margin, only when the margin scenario is fully supplied and matches the notional's. */
+    /**
+     * C9: notional / margin, only when the margin scenario is fully supplied and matches the
+     * notional's, AND the margin quote can be tied to this contract: [contract] is the gate
+     * over identity I1-I5, I7 and expiry I6 (§8.2a, §8.3 "C9 matching"). An unknown identity
+     * or expiry gives NOT_MODELLED (missing IDs reported); a blank identity text gives
+     * INVALID_INPUT, as in every other use of the gate. The supplied margin itself is unaffected.
+     */
     private fun leverage(
         i: FuturesInputs,
+        contract: FnoResult<Unit>,
         notional: FnoResult<BigDecimal>,
         margin: FnoResult<BigDecimal>,
         quantity: FnoResult<Long>,
@@ -320,7 +324,7 @@ object FuturesCalculator {
         dateR: FnoResult<java.time.LocalDate>,
         valR: FnoResult<ValuationPrice>,
     ): FnoResult<BigDecimal> {
-        val candidate = derive(listOf(notional, margin, quantity, openingSide, productR, dateR, valR)) { }
+        val candidate = derive(listOf(contract, notional, margin, quantity, openingSide, productR, dateR, valR)) { }
         if (!candidate.isAvailable) return candidate.unavailable()
         val sc = (i.margin as Input.Known).value.scenario
         val problems = ArrayList<String>()
