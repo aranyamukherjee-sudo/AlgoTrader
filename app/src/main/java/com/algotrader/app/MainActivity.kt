@@ -553,6 +553,14 @@ private var isHomeScreenActive = false
                 futuresMetadataStatus =
                     (outcome as? com.algotrader.app.backtest.FuturesContractMetadata.Outcome.Unavailable)
                         ?.reason
+
+                // Phase 3 Patch 8: metadata arrives asynchronously after the
+                // Backtest configuration may already have been rendered.
+                // Redraw only when Backtest is still the active screen so the
+                // authoritative contract lot size becomes visible immediately.
+                if (isBacktestScreenVisible) {
+                    renderBacktestConfiguration()
+                }
             }
         }
 
