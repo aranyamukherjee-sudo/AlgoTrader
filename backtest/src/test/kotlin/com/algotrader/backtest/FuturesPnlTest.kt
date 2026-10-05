@@ -126,4 +126,27 @@ class FuturesPnlTest {
         assertEquals(trade.grossPnl, d.rupeePnl, 1e-9)
         assertEquals(100_000.0 + d.rupeePnl, result.finalEquity, 1e-9)
     }
+
+    // ---- Patch 7: the supplied (verified) lot size is the only quantity basis ----
+
+    @Test
+    fun `rupee pnl uses exactly the supplied lot size`() {
+        val a = computed(FuturesPnl.compute(TradeDirection.LONG, 100.0, 104.0, contractQuantity = 7, lots = 2))
+        val b = computed(FuturesPnl.compute(TradeDirection.LONG, 100.0, 104.0, contractQuantity = 11, lots = 2))
+        assertEquals(4.0 * 7 * 2, a.rupeePnl)
+        assertEquals(4.0 * 11 * 2, b.rupeePnl)
+        // Neither a 1-unit fallback nor any other quantity is involved.
+        assertTrue(a.rupeePnl != 4.0 * 1 * 2)
+        assertEquals(14L, a.totalQuantity)
+        assertEquals(22L, b.totalQuantity)
+    }
+
+    @Test
+    fun `no fallback quantity exists when the lot size is unknown`() {
+        for (dir in TradeDirection.values()) {
+            assertIs<FuturesPnl.Outcome.Unavailable>(
+                FuturesPnl.compute(dir, 100.0, 110.0, contractQuantity = null, lots = 5)
+            )
+        }
+    }
 }

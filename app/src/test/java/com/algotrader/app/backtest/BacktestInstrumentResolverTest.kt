@@ -20,14 +20,19 @@ class BacktestInstrumentResolverTest {
     private val exactSymbol = "NSE:NIFTY26OCTFUT"
     private val expiry = 1_790_000_000L // arbitrary test epoch, carried through untouched
 
-    private fun futures(contractLotSize: Int?, expiryEpoch: Long? = expiry) = InstrumentInfo(
+    private fun futures(
+        contractLotSize: Int?,
+        expiryEpoch: Long? = expiry,
+        source: String? = if (contractLotSize != null) "test metadata source" else null
+    ) = InstrumentInfo(
         displayName = "NIFTY FUT",
         backendSymbol = exactSymbol,
         lotSize = 1, // legacy placeholder, must never be used for futures accounting
         isFutures = true,
         underlyingSymbol = "NSE:NIFTY50-INDEX",
         expiryEpochSeconds = expiryEpoch,
-        contractLotSize = contractLotSize
+        contractLotSize = contractLotSize,
+        contractLotSizeSource = source
     )
 
     private fun resolved(r: Resolution): Resolution.Resolved {
@@ -112,6 +117,43 @@ class BacktestInstrumentResolverTest {
             BacktestInstrumentResolver.resolve(BacktestInstrumentType.FUTURES, Instruments.NIFTY, Instruments.NIFTY)
                 is Resolution.Rejected
         )
+    }
+
+    @Test
+    fun `a lot size without a stated source is not verified and blocks futures`() {
+        for (source in listOf(null, "", "   ")) {
+            val r = BacktestInstrumentResolver.resolve(
+                BacktestInstrumentType.FUTURES, Instruments.NIFTY, futures(10, source = source)
+            )
+            assertTrue("source=$source", r is Resolution.Rejected)
+        }
+    }
+
+    @Test
+    fun `none of the three index lot sizes can enable futures`() {
+        // Even if an index lot size leaked into contractLotSize with no source, it stays blocked.
+        for (index in Instruments.all) {
+            val leaked = futures(index.lotSize, source = null)
+            assertTrue(
+                BacktestInstrumentResolver.resolve(BacktestInstrumentType.FUTURES, index, leaked)
+                    is Resolution.Rejected
+            )
+        }
+        // The legacy placeholder lotSize (1) of a discovered contract never counts.
+        val discovered = futures(null)
+        assertEquals(1, discovered.lotSize)
+        assertTrue(
+            BacktestInstrumentResolver.resolve(BacktestInstrumentType.FUTURES, Instruments.NIFTY, discovered)
+                is Resolution.Rejected
+        )
+    }
+
+    @Test
+    fun `the lot size source is carried into the persisted contract`() {
+        val r = resolved(
+            BacktestInstrumentResolver.resolve(BacktestInstrumentType.FUTURES, Instruments.NIFTY, futures(10))
+        )
+        assertEquals("test metadata source", r.futuresContract!!.lotSizeSource)
     }
 
     // ---- Expiry / metadata ---------------------------------------------------

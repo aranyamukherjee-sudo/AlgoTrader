@@ -116,7 +116,9 @@ data class InstrumentInfo(
      * only this field, and refuse to run while it is null. It is never copied
      * from an index's [lotSize].
      */
-    val contractLotSize: Int? = null
+    val contractLotSize: Int? = null,
+    /** Where [contractLotSize] came from; null exactly when it is unknown. */
+    val contractLotSizeSource: String? = null
 )
 
 object Instruments {
@@ -210,6 +212,10 @@ class MainActivity : Activity() {
     // ---- Home / trading workspace state ----
     private var selectedInstrument: InstrumentInfo = Instruments.NIFTY
     private var selectedFuturesContract: InstrumentInfo? = null
+
+    // Patch 7: reason the futures lot size is unavailable (null while known or not yet requested).
+    private var futuresMetadataStatus: String? = null
+    private var futuresMetadataRequestInFlight = false
     private var selectedTimeframe = "5m"
 
     private var selectedSignalStrategyId =
@@ -501,9 +507,74 @@ private var isHomeScreenActive = false
                         }
 
                         subscribeToFuturesContract(nearest)
+                        fetchFuturesContractMetadata(nearest)
                     } catch (_: Exception) {
                         // Preserve existing index market-data behavior.
                     }
+                }
+            }
+        })
+    }
+
+    /**
+     * Phase 3 Patch 7: request the authoritative lot size / expiry of the
+     * exact discovered contract from the backend. The result is validated by
+     * [FuturesContractMetadata]; on any failure the lot size stays unknown
+     * and futures backtesting stays unavailable. Nothing is defaulted.
+     */
+    private fun fetchFuturesContractMetadata(contract: InstrumentInfo) {
+        if (futuresMetadataRequestInFlight) return
+        futuresMetadataRequestInFlight = true
+
+        val request = Request.Builder()
+            .url(
+                "$BACKEND_HTTP_BASE/futures/contract-metadata" +
+                    "?symbol=${android.net.Uri.encode(contract.backendSymbol)}"
+            )
+            .get()
+            .build()
+
+        fun finish(outcome: com.algotrader.app.backtest.FuturesContractMetadata.Outcome) {
+            runOnUiThread {
+                futuresMetadataRequestInFlight = false
+                val current = selectedFuturesContract
+                // Ignore a result for a contract that is no longer the selected one.
+                if (current == null || current.backendSymbol != contract.backendSymbol) {
+                    return@runOnUiThread
+                }
+                val updated = com.algotrader.app.backtest.FuturesContractMetadata
+                    .applyTo(current, outcome)
+                selectedFuturesContract = updated
+                if (selectedInstrument.isFutures &&
+                    selectedInstrument.backendSymbol == updated.backendSymbol
+                ) {
+                    selectedInstrument = updated
+                }
+                futuresMetadataStatus =
+                    (outcome as? com.algotrader.app.backtest.FuturesContractMetadata.Outcome.Unavailable)
+                        ?.reason
+            }
+        }
+
+        wsClient.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                finish(
+                    com.algotrader.app.backtest.FuturesContractMetadata.Outcome.Unavailable(
+                        "Could not reach the metadata service."
+                    )
+                )
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: Response) {
+                response.use {
+                    val body = if (response.isSuccessful) response.body?.string() else null
+                    finish(
+                        com.algotrader.app.backtest.FuturesContractMetadata.parse(
+                            body,
+                            contract.backendSymbol,
+                            contract.expiryEpochSeconds
+                        )
+                    )
                 }
             }
         })
@@ -2900,14 +2971,26 @@ private fun futuresBacktestReady(): Boolean =
 private fun futuresBacktestNote(): String =
     when (val r = futuresBacktestResolution()) {
         is com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Rejected ->
-            r.reason
+            if (selectedFuturesContract != null) {
+                "Lot size: unavailable. " +
+                    (futuresMetadataStatus ?: r.reason)
+            } else {
+                r.reason
+            }
 
         is com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Resolved ->
-            "Contract ${r.instrument.backendSymbol} \u00b7 1 lot = ${r.lotSize} units. " +
+            "Contract ${r.instrument.backendSymbol} \u00b7 " +
+                "Lot size: ${r.lotSize} units " +
+                "(${r.instrument.contractLotSizeSource}). " +
                 "Uses futures candles; index candles are never substituted."
     }
 
 private fun renderBacktestConfiguration() {
+    // Retry the lot-size lookup if an earlier attempt failed; the status line
+    // reflects the result the next time this screen is drawn.
+    selectedFuturesContract?.let { contract ->
+        if (contract.contractLotSize == null) fetchFuturesContractMetadata(contract)
+    }
     BacktestScreen.renderConfig(
         this,
         content,

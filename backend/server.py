@@ -13,6 +13,12 @@ from fastapi.responses import RedirectResponse
 from fyers_apiv3.FyersWebsocket import data_ws
 from fyers_apiv3 import fyersModel
 
+from fno_metadata import (
+    ContractMetadataService,
+    MetadataUnavailable,
+    fetch_master_lines_from_fyers,
+)
+
 
 app = FastAPI(title="AlgoTrader Market Data API")
 
@@ -1347,6 +1353,36 @@ def history(
         return {
             "status": "error",
             "message": str(error),
+        }
+
+
+# Phase 3 Patch 7: authoritative contract metadata (lot size / expiry) for one
+# exact futures ticker, from the FYERS NSE F&O symbol master. See
+# fno_metadata.py. No lot size is ever defaulted or inferred.
+contract_metadata_service = ContractMetadataService(fetch_master_lines_from_fyers)
+
+
+@app.get("/futures/contract-metadata")
+def futures_contract_metadata(symbol: str):
+    """
+    Return the authoritative lot size and expiry of one exact FYERS futures
+    contract. On any failure the response is an explicit error and carries no
+    lot size.
+    """
+    normalized = symbol.strip().upper()
+    try:
+        return contract_metadata_service.get(normalized)
+    except MetadataUnavailable as error:
+        return {
+            "status": "error",
+            "symbol": normalized,
+            "message": str(error),
+        }
+    except Exception as error:
+        return {
+            "status": "error",
+            "symbol": normalized,
+            "message": f"Contract metadata failed: {error}",
         }
 
 

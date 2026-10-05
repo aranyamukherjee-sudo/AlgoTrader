@@ -80,6 +80,11 @@ object BacktestInstrumentResolver {
         if (lotSize == null || lotSize < 1) {
             return Resolution.Rejected(UNKNOWN_LOT_SIZE_MESSAGE)
         }
+        // A lot size without a stated authoritative source is not verified.
+        val source = contract.contractLotSizeSource
+        if (source.isNullOrBlank()) {
+            return Resolution.Rejected(UNKNOWN_LOT_SIZE_MESSAGE)
+        }
         return Resolution.Resolved(
             type = BacktestInstrumentType.FUTURES,
             instrument = contract,
@@ -90,6 +95,7 @@ object BacktestInstrumentResolver {
                 // The exact FYERS symbol returned by /futures/chain.
                 contractId = contract.backendSymbol,
                 lotSize = lotSize,
+                lotSizeSource = source,
                 // Carried as returned by the chain; null if it was not supplied.
                 expiryEpochSeconds = contract.expiryEpochSeconds
             )
