@@ -1072,7 +1072,8 @@ object BacktestScreen {
         positionSizing: PositionSizing,
         results: List<BacktestResult>,
         job: BacktestJobStore.Job? = null,
-        onRunAgain: () -> Unit
+        onRunAgain: () -> Unit,
+        futuresAccounting: List<BacktestJobStore.RestoredFuturesAccounting> = emptyList()
     ) {
         BacktestResultsScreen.render(
             context,
@@ -1084,7 +1085,8 @@ object BacktestScreen {
             positionSizing,
             results,
             job,
-            onRunAgain
+            onRunAgain,
+            futuresAccounting
         )
     }
 

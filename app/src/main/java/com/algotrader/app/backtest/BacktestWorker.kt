@@ -283,7 +283,23 @@ class BacktestWorker(
                     }
             )
 
-            store.saveResults(jobId, results)
+            val futuresAccounting = try {
+                FuturesBacktestAccounting.forJob(job, results)
+            } catch (e: Exception) {
+                // Accounting is diagnostic metadata only. It must never
+                // prevent successful engine results from being persisted.
+                FuturesBacktestAccounting.failureForJob(
+                    job,
+                    results,
+                    e
+                )
+            }
+
+            store.saveResults(
+                jobId,
+                results,
+                futuresAccounting
+            )
 
             android.util.Log.i(
                 "ALTRIXA_BACKTEST",

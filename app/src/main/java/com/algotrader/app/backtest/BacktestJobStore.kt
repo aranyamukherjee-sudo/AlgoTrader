@@ -432,17 +432,39 @@ class BacktestJobStore internal constructor(
     }
 
     @Synchronized
-    fun saveResults(jobId: String, results: List<BacktestResult>) {
+    fun saveResults(
+        jobId: String,
+        results: List<BacktestResult>,
+        /** Optional per-result futures accounting, index-aligned with [results]. */
+        futuresAccounting: List<FuturesBacktestAccounting.Block?> = emptyList()
+    ) {
         synchronized(BACKTEST_STORAGE_LOCK) {
             require(results.isNotEmpty()) {
                 "Cannot save empty backtest results"
+            }
+
+            require(
+                futuresAccounting.isEmpty() ||
+                    futuresAccounting.size == results.size
+            ) {
+                "Futures accounting must be index-aligned with results"
             }
 
             // Never (re)create results for a job that was cancelled or deleted.
             if (isCancelledOrMissing(jobId)) return
 
             val array = JSONArray()
-            results.forEach { array.put(resultToJson(it)) }
+
+            results.forEachIndexed { index, result ->
+                val json = resultToJson(result)
+                futuresAccounting.getOrNull(index)?.let {
+                    json.put(
+                        FUTURES_ACCOUNTING_KEY,
+                        futuresAccountingToJson(it)
+                    )
+                }
+                array.put(json)
+            }
 
             /*
              * Keep the dedicated result file for normal operation.
@@ -512,6 +534,279 @@ class BacktestJobStore internal constructor(
                     }
                 }
             }
+        }
+    }
+
+    private fun readResultsArray(jobId: String): JSONArray? =
+        readJsonArrayFile(resultsFile(jobId))
+            ?: readRoot()
+                .optJSONObject(RESULTS_KEY)
+                ?.optJSONArray(jobId)
+
+    sealed interface RestoredFuturesAccounting {
+        object Absent : RestoredFuturesAccounting
+
+        data class Present(
+            val block: FuturesBacktestAccounting.Block
+        ) : RestoredFuturesAccounting
+
+        data class Malformed(
+            val reason: String
+        ) : RestoredFuturesAccounting
+    }
+
+    @Synchronized
+    fun getFuturesAccounting(
+        jobId: String
+    ): List<RestoredFuturesAccounting> {
+        synchronized(BACKTEST_STORAGE_LOCK) {
+            val array = readResultsArray(jobId)
+                ?: return emptyList()
+
+            return buildList {
+                for (index in 0 until array.length()) {
+                    val entry = array.optJSONObject(index)
+
+                    add(
+                        when {
+                            entry == null ->
+                                RestoredFuturesAccounting.Absent
+
+                            !entry.has(FUTURES_ACCOUNTING_KEY) ->
+                                RestoredFuturesAccounting.Absent
+
+                            else ->
+                                futuresAccountingFromJson(
+                                    entry.opt(FUTURES_ACCOUNTING_KEY)
+                                )
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private fun futuresAccountingToJson(
+        b: FuturesBacktestAccounting.Block
+    ): JSONObject =
+        JSONObject().apply {
+            put("schemaVersion", b.schemaVersion)
+            put("contractId", b.contractId ?: JSONObject.NULL)
+            put("lotSize", b.lotSize ?: JSONObject.NULL)
+            put("lotSizeSource", b.lotSizeSource ?: JSONObject.NULL)
+            put(
+                "lotSizeEvidence",
+                b.lotSizeEvidence ?: JSONObject.NULL
+            )
+            put(
+                "expiryEpochSeconds",
+                b.expiryEpochSeconds ?: JSONObject.NULL
+            )
+            put("notionalBasis", b.notionalBasis)
+            put(
+                "contractNotional",
+                b.contractNotional?.toPlainString()
+                    ?: JSONObject.NULL
+            )
+            put("tradeCount", b.tradeCount)
+            put("computedTradeCount", b.computedTradeCount)
+            put(
+                "calculatorGrossPnl",
+                b.calculatorGrossPnl?.toPlainString()
+                    ?: JSONObject.NULL
+            )
+            put(
+                "engineGrossPnl",
+                b.engineGrossPnl?.toPlainString()
+                    ?: JSONObject.NULL
+            )
+            put(
+                "grossPnlDifference",
+                b.grossPnlDifference?.toPlainString()
+                    ?: JSONObject.NULL
+            )
+            put(
+                "grossPnlComparison",
+                b.grossPnlComparison.name
+            )
+            put("status", b.status.name)
+            put("reason", b.reason ?: JSONObject.NULL)
+            put("leverage", b.leverage)
+            put("charges", b.charges)
+            put("netPnl", b.netPnl)
+            put("breakEven", b.breakEven)
+        }
+
+    private fun futuresAccountingFromJson(
+        raw: Any?
+    ): RestoredFuturesAccounting {
+        val json = raw as? JSONObject
+            ?: return RestoredFuturesAccounting.Malformed(
+                "accounting block is not an object"
+            )
+
+        return try {
+            fun key(k: String): Any {
+                if (!json.has(k)) {
+                    throw IllegalArgumentException("missing $k")
+                }
+                return json.get(k)
+            }
+
+            fun isNull(k: String): Boolean =
+                key(k) == JSONObject.NULL
+
+            fun str(k: String): String =
+                key(k) as? String
+                    ?: throw IllegalArgumentException(
+                        "$k is not a string"
+                    )
+
+            fun strOrNull(k: String): String? =
+                if (isNull(k)) null else str(k)
+
+            fun long(k: String): Long =
+                when (val v = key(k)) {
+                    is Int -> v.toLong()
+                    is Long -> v
+                    else ->
+                        throw IllegalArgumentException(
+                            "$k is not an integer"
+                        )
+                }
+
+            fun int(k: String): Int {
+                val v = long(k)
+                if (
+                    v < Int.MIN_VALUE ||
+                    v > Int.MAX_VALUE
+                ) {
+                    throw IllegalArgumentException(
+                        "$k out of range"
+                    )
+                }
+                return v.toInt()
+            }
+
+            fun decimalOrNull(k: String): java.math.BigDecimal? =
+                if (isNull(k)) {
+                    null
+                } else {
+                    java.math.BigDecimal(str(k))
+                }
+
+            fun constant(
+                k: String,
+                expected: String
+            ): String {
+                val v = str(k)
+                if (v != expected) {
+                    throw IllegalArgumentException(
+                        "$k must be $expected, got $v"
+                    )
+                }
+                return v
+            }
+
+            val schema = int("schemaVersion")
+
+            if (
+                schema !=
+                    FuturesBacktestAccounting.SCHEMA_VERSION
+            ) {
+                throw IllegalArgumentException(
+                    "unsupported schemaVersion $schema"
+                )
+            }
+
+            val lotSize =
+                if (isNull("lotSize")) {
+                    null
+                } else {
+                    int("lotSize")
+                }
+
+            val lotSizeEvidence =
+                if (isNull("lotSizeEvidence")) {
+                    null
+                } else {
+                    constant(
+                        "lotSizeEvidence",
+                        FuturesBacktestAccounting.LOT_SIZE_EVIDENCE
+                    )
+                }
+
+            if (
+                (lotSize == null) !=
+                    (lotSizeEvidence == null)
+            ) {
+                throw IllegalArgumentException(
+                    "lotSize and lotSizeEvidence must both be present or both be null"
+                )
+            }
+
+            RestoredFuturesAccounting.Present(
+                FuturesBacktestAccounting.Block(
+                    schemaVersion = schema,
+                    contractId = strOrNull("contractId"),
+                    lotSize = lotSize,
+                    lotSizeSource = strOrNull("lotSizeSource"),
+                    lotSizeEvidence = lotSizeEvidence,
+                    expiryEpochSeconds =
+                        if (isNull("expiryEpochSeconds")) {
+                            null
+                        } else {
+                            long("expiryEpochSeconds")
+                        },
+                    notionalBasis =
+                        constant(
+                            "notionalBasis",
+                            FuturesBacktestAccounting.NOTIONAL_BASIS
+                        ),
+                    contractNotional =
+                        decimalOrNull("contractNotional"),
+                    tradeCount = int("tradeCount"),
+                    computedTradeCount =
+                        int("computedTradeCount"),
+                    calculatorGrossPnl =
+                        decimalOrNull("calculatorGrossPnl"),
+                    engineGrossPnl =
+                        decimalOrNull("engineGrossPnl"),
+                    grossPnlDifference =
+                        decimalOrNull("grossPnlDifference"),
+                    grossPnlComparison =
+                        FuturesBacktestAccounting.GrossPnlComparison
+                            .valueOf(str("grossPnlComparison")),
+                    status =
+                        FuturesBacktestAccounting.Status
+                            .valueOf(str("status")),
+                    reason = strOrNull("reason"),
+                    leverage =
+                        constant(
+                            "leverage",
+                            FuturesBacktestAccounting.NOT_MODELLED
+                        ),
+                    charges =
+                        constant(
+                            "charges",
+                            FuturesBacktestAccounting.NOT_MODELLED
+                        ),
+                    netPnl =
+                        constant(
+                            "netPnl",
+                            FuturesBacktestAccounting.NOT_MODELLED
+                        ),
+                    breakEven =
+                        constant(
+                            "breakEven",
+                            FuturesBacktestAccounting.NOT_MODELLED
+                        )
+                )
+            )
+        } catch (e: Exception) {
+            RestoredFuturesAccounting.Malformed(
+                "${e.javaClass.simpleName}: ${e.message}"
+            )
         }
     }
 
@@ -1142,6 +1437,8 @@ class BacktestJobStore internal constructor(
     }
 
     companion object {
+        private const val FUTURES_ACCOUNTING_KEY = "futuresAccounting"
+
         private val TERMINAL_STATUSES = setOf(
             Status.COMPLETED,
             Status.FAILED,

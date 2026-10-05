@@ -3176,7 +3176,7 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
                 }
             }
 
-            val results = try {
+            val resultsWithAccounting = try {
                 val runJobs = if (job.runId != null) {
                     backtestJobStore.list()
                         .filter { it.runId == job.runId }
@@ -3188,7 +3188,16 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
                 runJobs
                     .filter { it.status == BacktestJobStore.Status.COMPLETED }
                     .flatMap { runJob ->
-                        backtestJobStore.getResults(runJob.id)
+                        val runResults = backtestJobStore.getResults(runJob.id)
+                        val runAccounting =
+                            backtestJobStore.getFuturesAccounting(runJob.id)
+
+                        runResults.mapIndexed { index, result ->
+                            result to (
+                                runAccounting.getOrNull(index)
+                                    ?: BacktestJobStore.RestoredFuturesAccounting.Absent
+                                )
+                        }
                     }
             } catch (e: Exception) {
                 content.removeAllViews()
@@ -3208,6 +3217,9 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
 
                 return
             }
+
+            val results = resultsWithAccounting.map { it.first }
+            val futuresAccounting = resultsWithAccounting.map { it.second }
 
             android.util.Log.i(
                 "ALTRIXA_BACKTEST",
@@ -3240,12 +3252,14 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
                     initialCapital = job.initialCapital,
                     positionSizing = job.positionSizing,
                     results = results,
-                    job = job
-                ) {
-                    activeBacktestJobId = null
-                    renderedBacktestJobId = null
-                    renderBacktestConfiguration()
-                }
+                    job = job,
+                    onRunAgain = {
+                        activeBacktestJobId = null
+                        renderedBacktestJobId = null
+                        renderBacktestConfiguration()
+                    },
+                    futuresAccounting = futuresAccounting
+                )
             } else {
                 content.removeAllViews()
 

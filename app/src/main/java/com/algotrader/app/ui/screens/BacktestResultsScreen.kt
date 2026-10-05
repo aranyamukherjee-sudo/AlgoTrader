@@ -7,6 +7,7 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.algotrader.app.backtest.BacktestFormat
+import com.algotrader.app.backtest.BacktestInstrumentType
 import com.algotrader.app.backtest.BacktestJobStore
 import com.algotrader.app.theme.AltrixaColors
 import com.algotrader.app.theme.AltrixaDimens
@@ -59,11 +60,13 @@ internal object BacktestResultsScreen {
         positionSizing: PositionSizing,
         results: List<BacktestResult>,
         job: BacktestJobStore.Job?,
-        onRunAgain: () -> Unit
+        onRunAgain: () -> Unit,
+        futuresAccounting: List<BacktestJobStore.RestoredFuturesAccounting> = emptyList()
     ) {
         BacktestScreen.header(context, container, "Performance report")
 
         val intraday = timeframe != "1D"
+        val isFutures = job?.instrumentType == BacktestInstrumentType.FUTURES
 
         if (results.isEmpty()) {
             container.addView(altrixaSectionHeader(context, "Results"))
@@ -80,14 +83,31 @@ internal object BacktestResultsScreen {
             )
             container.addView(card, BacktestScreen.topGap(context))
         } else if (results.any { it.sample != BacktestSample.FULL }) {
-            outOfSampleBody(context, container, results, instrumentName, timeframe, intraday)
+            outOfSampleBody(
+                context,
+                container,
+                results,
+                instrumentName,
+                timeframe,
+                intraday,
+                isFutures,
+                futuresAccounting
+            )
             configurationCard(
                 context, container, results, instrumentName, timeframe,
                 candleCount, initialCapital, positionSizing, job
             )
         } else if (results.size == 1) {
             val result = results.first()
-            resultBody(context, container, result, instrumentName, timeframe)
+            resultBody(
+                context,
+                container,
+                result,
+                instrumentName,
+                timeframe,
+                isFutures,
+                futuresAccounting.getOrNull(0)
+            )
             configurationCard(
                 context, container, results, instrumentName, timeframe,
                 candleCount, initialCapital, positionSizing, job
@@ -95,9 +115,23 @@ internal object BacktestResultsScreen {
             tradesSection(context, container, result.trades, intraday, result.config.lotSize)
         } else {
             comparisonCard(context, container, results)
-            results.forEach { result ->
-                resultBody(context, container, result, instrumentName, timeframe)
-                tradesSection(context, container, result.trades, intraday, result.config.lotSize)
+            results.forEachIndexed { resultIndex, result ->
+                resultBody(
+                    context,
+                    container,
+                    result,
+                    instrumentName,
+                    timeframe,
+                    isFutures,
+                    futuresAccounting.getOrNull(resultIndex)
+                )
+                tradesSection(
+                    context,
+                    container,
+                    result.trades,
+                    intraday,
+                    result.config.lotSize
+                )
             }
             configurationCard(
                 context, container, results, instrumentName, timeframe,
@@ -130,7 +164,9 @@ internal object BacktestResultsScreen {
         results: List<BacktestResult>,
         instrumentName: String,
         timeframe: String,
-        intraday: Boolean
+        intraday: Boolean,
+        isFutures: Boolean,
+        futuresAccounting: List<BacktestJobStore.RestoredFuturesAccounting>
     ) {
         container.addView(altrixaSectionHeader(context, "Out-of-sample test"))
         val note = altrixaCard(context)
@@ -160,8 +196,28 @@ internal object BacktestResultsScreen {
                 container.addView(altrixaSectionHeader(context, title))
             }
             group.forEach { result ->
-                resultBody(context, container, result, instrumentName, timeframe)
-                tradesSection(context, container, result.trades, intraday, result.config.lotSize)
+                val accountingIndex = results.indexOfFirst {
+                    it.strategyName == result.strategyName
+                        .removeSuffix(" · $label")
+                        && it.sample == sample
+                }
+
+                resultBody(
+                    context,
+                    container,
+                    result,
+                    instrumentName,
+                    timeframe,
+                    isFutures,
+                    futuresAccounting.getOrNull(accountingIndex)
+                )
+                tradesSection(
+                    context,
+                    container,
+                    result.trades,
+                    intraday,
+                    result.config.lotSize
+                )
             }
         }
     }
@@ -266,7 +322,10 @@ internal object BacktestResultsScreen {
         container: LinearLayout,
         result: BacktestResult,
         instrumentName: String,
-        timeframe: String
+        timeframe: String,
+        isFutures: Boolean = false,
+        futuresAccounting: BacktestJobStore.RestoredFuturesAccounting? =
+            null
     ) {
         val m = result.metrics
         val tone = pnlTone(m.netProfit, m.totalTrades)
@@ -313,7 +372,10 @@ internal object BacktestResultsScreen {
         )
 
         hero.addView(
-            altrixaCaption(context, "Net P&L"),
+            altrixaCaption(
+                context,
+                if (isFutures) "P&L before costs" else "Net P&L"
+            ),
             BacktestScreen.matchWidth(context, topMargin = AltrixaDimens.spaceLg)
         )
         val pnlRow = LinearLayout(context).apply {
@@ -345,7 +407,16 @@ internal object BacktestResultsScreen {
         hero.addView(capitalRow, BacktestScreen.matchWidth(context))
         container.addView(hero, BacktestScreen.topGap(context))
 
-        // ---- KPI grid ----
+
+        if (isFutures) {
+            addFuturesAccountingCard(
+                context,
+                container,
+                futuresAccounting
+            )
+        }
+
+// ---- KPI grid ----
         container.addView(altrixaSectionHeader(context, "Performance"))
         val returnTone = if (m.totalReturnPercent >= 0.0) AltrixaTone.POSITIVE else AltrixaTone.NEGATIVE
 
@@ -857,4 +928,102 @@ internal object BacktestResultsScreen {
                 LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.6f)
             )
         }
+    private fun addFuturesAccountingCard(
+        context: Context,
+        container: LinearLayout,
+        restored: BacktestJobStore.RestoredFuturesAccounting?
+    ) {
+        container.addView(
+            altrixaSectionHeader(context, "Futures accounting")
+        )
+
+        val card = altrixaCard(context)
+
+        when (restored) {
+            null,
+            BacktestJobStore.RestoredFuturesAccounting.Absent -> {
+                card.addView(
+                    altrixaCaption(
+                        context,
+                        "Accounting block unavailable for this result."
+                    )
+                )
+            }
+
+            is BacktestJobStore.RestoredFuturesAccounting.Malformed -> {
+                card.addView(
+                    altrixaStatusBlock(
+                        context = context,
+                        kind = AltrixaIconKind.ALERT,
+                        tint = altrixaToneColor(AltrixaTone.ACCENT),
+                        title = "Saved accounting block is malformed.",
+                        message = restored.reason
+                    )
+                )
+            }
+
+            is BacktestJobStore.RestoredFuturesAccounting.Present -> {
+                val b = restored.block
+
+                fun row(label: String, value: String) {
+                    card.addView(
+                        altrixaLabel(context, "$label: $value"),
+                        BacktestScreen.matchWidth(
+                            context,
+                            bottomMargin = AltrixaDimens.spaceXs
+                        )
+                    )
+                }
+
+                row("Status", b.status.name)
+                b.reason?.let { row("Reason", it) }
+                row("Contract", b.contractId ?: "—")
+                row("Lot size", b.lotSize?.toString() ?: "—")
+                row("Lot size source", b.lotSizeSource ?: "—")
+                row("Lot size evidence", b.lotSizeEvidence ?: "—")
+                row(
+                    "Expiry epoch seconds",
+                    b.expiryEpochSeconds?.toString() ?: "—"
+                )
+                row(
+                    "Trades / computed",
+                    "${b.tradeCount} / ${b.computedTradeCount}"
+                )
+                row(
+                    "Calculator gross P&L",
+                    b.calculatorGrossPnl?.toPlainString() ?: "—"
+                )
+                row(
+                    "Engine gross P&L",
+                    b.engineGrossPnl?.toPlainString() ?: "—"
+                )
+                row(
+                    "Gross P&L difference",
+                    b.grossPnlDifference?.toPlainString() ?: "—"
+                )
+                row(
+                    "Comparison",
+                    b.grossPnlComparison.name
+                )
+                row(
+                    "Contract notional",
+                    b.contractNotional?.toPlainString() ?: "—"
+                )
+                row("Notional basis", b.notionalBasis)
+                row("Leverage", b.leverage)
+                row("Charges", b.charges)
+                row("Net P&L", b.netPnl)
+                row("Break-even", b.breakEven)
+            }
+        }
+
+        container.addView(
+            card,
+            BacktestScreen.matchWidth(
+                context,
+                bottomMargin = AltrixaDimens.spaceMd
+            )
+        )
+    }
+
 }
