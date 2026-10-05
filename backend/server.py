@@ -1098,6 +1098,34 @@ def futures_history(
             ),
         }
 
+    # FYERS F&O intraday historical data supports a maximum
+    # request window of 100 days. Keep daily history unrestricted.
+    if resolution != "D":
+        try:
+            range_from_epoch = int(range_from)
+            range_to_epoch = int(range_to)
+        except ValueError:
+            return {
+                "status": "error",
+                "message": "range_from and range_to must be epoch seconds",
+            }
+
+        if range_to_epoch <= range_from_epoch:
+            return {
+                "status": "error",
+                "message": "range_to must be greater than range_from",
+            }
+
+        max_intraday_seconds = 100 * 24 * 60 * 60
+
+        if range_to_epoch - range_from_epoch > max_intraday_seconds:
+            return {
+                "status": "error",
+                "message": (
+                    "F&O intraday history request cannot exceed 100 days"
+                ),
+            }
+
     data = {
         "symbol": exact_symbol,
         "resolution": resolution,

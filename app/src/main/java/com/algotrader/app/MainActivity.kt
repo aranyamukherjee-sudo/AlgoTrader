@@ -102,7 +102,10 @@ data class InstrumentInfo(
      * always whole lots. Exchanges revise lot sizes periodically, so keep
      * these in sync with the latest NSE/BSE circulars.
      */
-    val lotSize: Int = 1
+    val lotSize: Int = 1,
+    val isFutures: Boolean = false,
+    val underlyingSymbol: String? = null,
+    val expiryEpochSeconds: Long? = null
 )
 
 object Instruments {
@@ -195,6 +198,7 @@ class MainActivity : Activity() {
 
     // ---- Home / trading workspace state ----
     private var selectedInstrument: InstrumentInfo = Instruments.NIFTY
+    private var selectedFuturesContract: InstrumentInfo? = null
     private var selectedTimeframe = "5m"
 
     private var selectedSignalStrategyId =
@@ -373,6 +377,197 @@ private var isHomeScreenActive = false
         ) {
             updateHeaderPrice()
         }
+    }
+
+
+    /**
+     * Phase 3 Patch 5:
+     * Discover the actual nearest NIFTY futures contract from FYERS.
+     *
+     * The backend returns exact contract symbols and expiry timestamps.
+     * Android never constructs a futures symbol itself.
+     */
+    private fun discoverNiftyFuturesContract() {
+        val request = Request.Builder()
+            .url(
+                "$BACKEND_HTTP_BASE/futures/chain" +
+                    "?symbol=${android.net.Uri.encode("NSE:NIFTY50-INDEX")}"
+            )
+            .build()
+
+        wsClient.newCall(request).enqueue(object : okhttp3.Callback {
+
+            override fun onFailure(
+                call: okhttp3.Call,
+                e: java.io.IOException
+            ) {
+                // Existing index functionality remains unaffected.
+            }
+
+            override fun onResponse(
+                call: okhttp3.Call,
+                response: Response
+            ) {
+                response.use {
+                    if (!response.isSuccessful) return
+
+                    try {
+                        val root = JSONObject(
+                            response.body?.string() ?: return
+                        )
+
+                        if (backendRequiresFyersAuth(root)) {
+                            handleFyersAuthRequired()
+                            return
+                        }
+
+                        val responseObject =
+                            root.optJSONObject("response") ?: return
+
+                        val data =
+                            responseObject.optJSONArray("data") ?: return
+
+                        val contractPattern =
+                            Regex(
+                                "^NSE:NIFTY\\d{2}" +
+                                    "(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)" +
+                                    "FUT$"
+                            )
+
+                        val contracts = mutableListOf<InstrumentInfo>()
+
+                        for (i in 0 until data.length()) {
+                            val item = data.optJSONObject(i) ?: continue
+                            val symbol = item.optString("symbol").trim().uppercase()
+                            if (!contractPattern.matches(symbol)) continue
+
+                            val expiry = item.optLong("expiry", 0L)
+                            if (expiry <= 0L) continue
+
+                            contracts.add(
+                                InstrumentInfo(
+                                    displayName = "NIFTY FUT",
+                                    backendSymbol = symbol,
+                                    // Exact futures lot size is deliberately
+                                    // not inferred from the chain.
+                                    lotSize = 1,
+                                    isFutures = true,
+                                    underlyingSymbol = "NSE:NIFTY50-INDEX",
+                                    expiryEpochSeconds = expiry
+                                )
+                            )
+                        }
+
+                        val nearest = contracts
+                            .filter {
+                                it.expiryEpochSeconds != null &&
+                                    it.expiryEpochSeconds > 0L
+                            }
+                            .minByOrNull {
+                                it.expiryEpochSeconds!!
+                            }
+                            ?: return
+
+                        runOnUiThread {
+                            selectedFuturesContract = nearest
+
+                            // If Home is already visible, rebuild it so the
+                            // discovered exact futures contract appears in
+                            // the selector immediately.
+                            if (isHomeScreenActive) {
+                                if (selectedInstrument.isFutures) {
+                                    selectedInstrument = nearest
+                                }
+                                showHome()
+                            } else if (selectedInstrument.isFutures) {
+                                // Preserve the discovered contract even when
+                                // Home is not currently visible.
+                                selectedInstrument = nearest
+                            }
+                        }
+
+                        subscribeToFuturesContract(nearest)
+                    } catch (_: Exception) {
+                        // Preserve existing index market-data behavior.
+                    }
+                }
+            }
+        })
+    }
+
+    /**
+     * Add the exact discovered futures contract to the backend's running
+     * WebSocket subscription.
+     */
+    private fun subscribeToFuturesContract(contract: InstrumentInfo) {
+        val request = Request.Builder()
+            .url(
+                "$BACKEND_HTTP_BASE/futures/subscribe" +
+                    "?symbol=${android.net.Uri.encode(contract.backendSymbol)}"
+            )
+            .get()
+            .build()
+
+        wsClient.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(
+                call: okhttp3.Call,
+                e: java.io.IOException
+            ) {
+                // WebSocket reconnect logic remains unchanged.
+            }
+
+            override fun onResponse(
+                call: okhttp3.Call,
+                response: Response
+            ) {
+                response.use {
+                    // The backend owns subscription state. No local
+                    // fabrication or retry loop is needed here.
+                }
+            }
+        })
+    }
+
+    /**
+     * FYERS F&O intraday history is requested in bounded windows.
+     * Verified futures history works through the required 100-day window.
+     */
+    private fun futuresHistoryRangeDays(): Long = 100L
+
+    /**
+     * Build the exact F&O history request.
+     *
+     * FYERS rejects a range_to equal to the current/future date, so the
+     * request ends at yesterday 23:59:59 IST.
+     */
+    private fun futuresHistoryUrl(
+        symbol: String,
+        resolution: String
+    ): String {
+        val ist = java.time.ZoneId.of("Asia/Kolkata")
+        val yesterday =
+            java.time.LocalDate.now(ist).minusDays(1)
+
+        val rangeTo =
+            yesterday
+                .atTime(23, 59, 59)
+                .atZone(ist)
+                .toEpochSecond()
+
+        val rangeFrom =
+            yesterday
+                .minusDays(futuresHistoryRangeDays() - 1L)
+                .atStartOfDay(ist)
+                .toEpochSecond()
+
+        return "$BACKEND_HTTP_BASE/futures/history" +
+            "?symbol=${android.net.Uri.encode(symbol)}" +
+            "&resolution=${android.net.Uri.encode(resolution)}" +
+            "&range_from=$rangeFrom" +
+            "&range_to=$rangeTo" +
+            "&date_format=0" +
+            "&include_oi=0" +
+            "&include_greeks=0"
     }
 
     private fun loadHistoryForSelected() {
@@ -894,12 +1089,21 @@ private var isHomeScreenActive = false
             setHeaderStatus("Loading ${instrument.displayName}…")
         }
 
-        val historyDays = 365
-        val request = Request.Builder()
-            .url(
+        val requestUrl =
+            if (instrument.isFutures) {
+                futuresHistoryUrl(
+                    symbol = requestedSymbol,
+                    resolution = resolution
+                )
+            } else {
+                val historyDays = 365
                 "$BACKEND_HTTP_BASE/history" +
-                    "?symbol=$requestedSymbol&resolution=$resolution&days=$historyDays"
-            )
+                    "?symbol=$requestedSymbol" +
+                    "&resolution=$resolution&days=$historyDays"
+            }
+
+        val request = Request.Builder()
+            .url(requestUrl)
             .build()
 
         wsClient.newCall(request).enqueue(object : okhttp3.Callback {
@@ -937,7 +1141,11 @@ private var isHomeScreenActive = false
                             return
                         }
 
-                        val array = root.optJSONArray("candles")
+                        val array =
+                            root.optJSONArray("candles")
+                                ?: root
+                                    .optJSONObject("response")
+                                    ?.optJSONArray("data")
 
                         if (array == null || array.length() == 0) {
                             runOnUiThread {
@@ -1377,12 +1585,24 @@ private var isHomeScreenActive = false
         if (!intradayRefreshInFlight.add(cacheKey)) return
 
         val resolution = timeframeResolution()
-        val request = Request.Builder()
-            .url(
+
+        val requestUrl =
+            if (instrument.isFutures) {
+                // The primary futures history request already supplies the
+                // authoritative bounded range. Refresh the same bounded
+                // window rather than sending current/future range_to.
+                futuresHistoryUrl(
+                    symbol = instrument.backendSymbol,
+                    resolution = resolution
+                )
+            } else {
                 "$BACKEND_HTTP_BASE/history" +
                     "?symbol=${instrument.backendSymbol}" +
                     "&resolution=$resolution&days=5"
-            )
+            }
+
+        val request = Request.Builder()
+            .url(requestUrl)
             .build()
 
         wsClient.newCall(request).enqueue(object : okhttp3.Callback {
@@ -1398,7 +1618,18 @@ private var isHomeScreenActive = false
 
                         val body = response.body?.string() ?: return
                         val root = JSONObject(body)
-                        val array = root.optJSONArray("candles") ?: return
+
+                        if (backendRequiresFyersAuth(root)) {
+                            handleFyersAuthRequired()
+                            return
+                        }
+
+                        val array =
+                            root.optJSONArray("candles")
+                                ?: root
+                                    .optJSONObject("response")
+                                    ?.optJSONArray("data")
+                                ?: return
 
                         val fresh = mutableListOf<Candle>()
 
@@ -1517,7 +1748,13 @@ private var isHomeScreenActive = false
 
                         val quotes = root.optJSONObject("quotes") ?: return
 
-                        for (instrument in Instruments.all) {
+                        val subscribedInstruments =
+                            buildList {
+                                addAll(Instruments.all)
+                                selectedFuturesContract?.let { add(it) }
+                            }.distinctBy { it.backendSymbol }
+
+                        for (instrument in subscribedInstruments) {
                             val ltp = quotes.optJSONObject(instrument.backendSymbol)
                                 ?.optDouble("ltp", Double.NaN) ?: Double.NaN
 
@@ -1597,6 +1834,7 @@ private var isHomeScreenActive = false
 
         buildApp()
         connectQuotesWebSocket()
+        discoverNiftyFuturesContract()
 
         if (intent?.action == FYERS_AUTH_RENEW_ACTION) {
             startFyersOAuthRenewal()
@@ -1975,11 +2213,25 @@ private var isHomeScreenActive = false
             setPadding(0, dp(4), 0, dp(4))
         }
 
-        Instruments.all.forEach { instrument ->
-            val selected = instrument.backendSymbol == selectedInstrument.backendSymbol
+        instrumentButtons.clear()
+
+        val instruments = buildList {
+            addAll(Instruments.all)
+            selectedFuturesContract?.let { add(it) }
+        }.distinctBy { it.backendSymbol }
+
+        instruments.forEach { instrument ->
+            val selected =
+                instrument.backendSymbol == selectedInstrument.backendSymbol
+
             val chip = altrixaChip(this, instrument.displayName, selected) {
                 if (selectedInstrument.backendSymbol != instrument.backendSymbol) {
                     selectedInstrument = instrument
+
+                    if (instrument.isFutures) {
+                        subscribeToFuturesContract(instrument)
+                    }
+
                     showHome()
                 }
             }
