@@ -1490,6 +1490,20 @@ def futures_history(
             "response": merged_response,
         }
 
+    # All non-5m+live-merge resolutions return the FYERS
+    # historical response directly.
+    return {
+        "status": "ok",
+        "symbol": exact_symbol,
+        "resolution": resolution,
+        "date_format": date_format,
+        "range_from": range_from,
+        "range_to": range_to,
+        "include_oi": include_oi,
+        "include_greeks": include_greeks,
+        "response": merged_response,
+    }
+
 @app.get("/history")
 def history(
     symbol: str = "NSE:NIFTY50-INDEX",
