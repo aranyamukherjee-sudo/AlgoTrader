@@ -1444,6 +1444,13 @@ def futures_history(
                 futures_live_candles.get(exact_symbol, {})
             )
 
+        # P3P10 diagnostic only: expose live accumulator state.
+        merged_response["live_symbol_present"] = bool(symbol_candles)
+        merged_response["live_candle_count"] = len(symbol_candles)
+        merged_response["live_latest_timestamp"] = (
+            max(symbol_candles.keys()) if symbol_candles else None
+        )
+
         for candle in symbol_candles.values():
             timestamp = int(candle["timestamp"])
 
