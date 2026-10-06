@@ -1,4 +1,5 @@
 import os
+import json
 import asyncio
 import threading
 import time
@@ -32,6 +33,8 @@ SYMBOLS = [
 # The base index symbols above remain permanently subscribed.
 futures_subscriptions = set()
 futures_subscriptions_lock = threading.Lock()
+
+_load_futures_live_state()
 
 latest_quotes = {}
 lock = threading.Lock()
@@ -118,6 +121,107 @@ futures_live_candles_lock = threading.Lock()
 # Last cumulative FYERS session volume observed for each symbol.
 # Used to derive per-bucket traded volume.
 futures_live_volume_baseline = {}
+
+# ------------------------------------------------------------
+# Persistent futures live state
+# ------------------------------------------------------------
+FUTURES_LIVE_STATE_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "data",
+    "futures_live_state.json",
+)
+
+futures_live_state_persist_lock = threading.Lock()
+
+
+def _persist_futures_live_state():
+    os.makedirs(os.path.dirname(FUTURES_LIVE_STATE_PATH), exist_ok=True)
+
+    with futures_live_candles_lock:
+        candles_snapshot = {
+            symbol: {
+                str(timestamp): dict(candle)
+                for timestamp, candle in symbol_candles.items()
+            }
+            for symbol, symbol_candles in futures_live_candles.items()
+        }
+        volume_snapshot = dict(futures_live_volume_baseline)
+
+    with futures_subscriptions_lock:
+        subscriptions_snapshot = sorted(futures_subscriptions)
+
+    state = {
+        "schema_version": 1,
+        "futures_live_candles": candles_snapshot,
+        "futures_live_volume_baseline": volume_snapshot,
+        "futures_subscriptions": subscriptions_snapshot,
+    }
+
+    temp_path = FUTURES_LIVE_STATE_PATH + ".tmp"
+
+    with futures_live_state_persist_lock:
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, separators=(",", ":"))
+        os.replace(temp_path, FUTURES_LIVE_STATE_PATH)
+
+
+def _load_futures_live_state():
+    if not os.path.exists(FUTURES_LIVE_STATE_PATH):
+        return
+
+    try:
+        with open(FUTURES_LIVE_STATE_PATH, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        with futures_live_candles_lock:
+            for symbol, symbol_candles in state.get(
+                "futures_live_candles", {}
+            ).items():
+                restored = {}
+
+                for timestamp, candle in symbol_candles.items():
+                    try:
+                        ts = int(timestamp)
+                        restored[ts] = {
+                            "timestamp": ts,
+                            "open": float(candle["open"]),
+                            "high": float(candle["high"]),
+                            "low": float(candle["low"]),
+                            "close": float(candle["close"]),
+                            "volume": float(candle.get("volume", 0)),
+                        }
+                    except (KeyError, TypeError, ValueError):
+                        continue
+
+                if restored:
+                    futures_live_candles[symbol] = restored
+
+        for symbol, baseline in state.get(
+            "futures_live_volume_baseline", {}
+        ).items():
+            try:
+                futures_live_volume_baseline[symbol] = float(baseline)
+            except (TypeError, ValueError):
+                continue
+
+        with futures_subscriptions_lock:
+            for symbol in state.get("futures_subscriptions", []):
+                if isinstance(symbol, str) and symbol:
+                    futures_subscriptions.add(symbol)
+
+        print(
+            "Loaded persistent futures state: "
+            f"symbols={len(futures_live_candles)}, "
+            f"subscriptions={len(futures_subscriptions)}",
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            f"WARNING: failed to load persistent futures state: {error}",
+            flush=True,
+        )
+
 
 
 def _futures_live_bucket(timestamp):
@@ -212,7 +316,17 @@ def _update_futures_live_candle(message):
             for old_timestamp in oldest:
                 symbol_candles.pop(old_timestamp, None)
 
-        return dict(candle)
+        result = dict(candle)
+
+    try:
+        _persist_futures_live_state()
+    except Exception as error:
+        print(
+            f"WARNING: failed to persist futures live candle: {error}",
+            flush=True,
+        )
+
+    return result
 
 
 def on_message(message):
@@ -1753,6 +1867,14 @@ def subscribe_futures(symbol: str):
 
     with futures_subscriptions_lock:
         futures_subscriptions.add(normalized)
+
+    try:
+        _persist_futures_live_state()
+    except Exception as error:
+        print(
+            f"WARNING: failed to persist futures subscription: {error}",
+            flush=True,
+        )
 
     current_socket = socket
 
