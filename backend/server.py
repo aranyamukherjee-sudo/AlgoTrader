@@ -1770,10 +1770,15 @@ def quotes():
     with lock:
         data = dict(latest_quotes)
 
+    with futures_subscriptions_lock:
+        subscribed_futures = sorted(futures_subscriptions)
+
     return {
         "status": "ok",
         "fyers": fyers_status,
         "quotes": data,
+        "futures_subscriptions": subscribed_futures,
+        "requested_futures_present": "NSE:NIFTY26OCTFUT" in futures_subscriptions,
     }
 
 
