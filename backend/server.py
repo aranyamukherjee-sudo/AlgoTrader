@@ -1184,90 +1184,6 @@ def futures_chain(
         }
 
 
-@app.get("/diagnostic/fyers-today-futures")
-def diagnostic_fyers_today_futures(
-    symbol: str,
-    range_from: str,
-    range_to: str,
-):
-    """
-    Temporary diagnostic only.
-
-    Calls FYERS F&O historical data directly without the normal
-    current-day clamp used by /futures/history.
-
-    Returns candle metadata only; never exposes credentials or the
-    raw FYERS response.
-    """
-    if not history_client:
-        return {
-            "status": "error",
-            "message": "FYERS F&O client not ready",
-        }
-
-    try:
-        from_epoch = int(range_from)
-        to_epoch = int(range_to)
-    except ValueError:
-        return {
-            "status": "error",
-            "message": "Invalid epoch range",
-        }
-
-    if to_epoch <= from_epoch:
-        return {
-            "status": "error",
-            "message": "range_to must be greater than range_from",
-        }
-
-    data = {
-        "symbol": symbol.strip(),
-        "resolution": "5",
-        "date_format": 0,
-        "range_from": str(from_epoch),
-        "range_to": str(to_epoch),
-        "include_oi": 0,
-        "include_greeks": 0,
-    }
-
-    try:
-        response = history_client.fno_historical_data(data=data)
-    except Exception as error:
-        return {
-            "status": "error",
-            "message": str(error),
-        }
-
-    if not isinstance(response, dict):
-        return {
-            "status": "error",
-            "message": "Invalid FYERS response",
-        }
-
-    candles = response.get("candles", [])
-
-    result = {
-        "status": "ok" if response.get("s") == "ok" else "fyers_error",
-        "symbol": symbol.strip(),
-        "range_from": str(from_epoch),
-        "range_to": str(to_epoch),
-        "fyers_status": response.get("s"),
-        "fyers_code": response.get("code"),
-        "candle_count": len(candles) if isinstance(candles, list) else 0,
-    }
-
-    if isinstance(candles, list) and candles:
-        first = candles[0]
-        last = candles[-1]
-
-        result["first_timestamp"] = first[0] if first else None
-        result["last_timestamp"] = last[0] if last else None
-        result["first_candle"] = first
-        result["last_candle"] = last
-
-    return result
-
-
 @app.get("/futures/history")
 def futures_history(
     symbol: str,
@@ -1380,15 +1296,20 @@ def futures_history(
 
     historical_range_to = range_to
 
-    if (
-        include_oi == 0
-        and range_to_epoch >= today_start_epoch
-    ):
-        historical_range_to = str(yesterday_end_epoch)
-
-    today_only_live_range = (
+    requests_today_history = (
         resolution == "5"
         and include_oi == 0
+        and range_to_epoch >= today_start_epoch
+    )
+
+    if requests_today_history:
+        historical_range_to = str(yesterday_end_epoch)
+
+    today_history_response = None
+    today_history_error = None
+
+    today_only_live_range = (
+        requests_today_history
         and range_from_epoch >= today_start_epoch
     )
 
@@ -1432,10 +1353,72 @@ def futures_history(
 
         mark_rest_auth_success()
 
+    # Separately request today's real 5-minute F&O history.
+    # If FYERS rejects the current-day request, the endpoint still
+    # returns historical data and the live WebSocket candle below.
+    if requests_today_history:
+        today_from_epoch = max(
+            range_from_epoch,
+            today_start_epoch,
+        )
+
+        if today_from_epoch <= range_to_epoch:
+            today_data = {
+                "symbol": exact_symbol,
+                "resolution": "5",
+                "date_format": date_format,
+                "range_from": str(today_from_epoch),
+                "range_to": str(range_to_epoch),
+                "include_oi": include_oi,
+                "include_greeks": include_greeks,
+            }
+
+            try:
+                today_history_response = (
+                    history_client.fno_historical_data(
+                        data=today_data
+                    )
+                )
+
+                if (
+                    isinstance(today_history_response, dict)
+                    and today_history_response.get("s") == "ok"
+                ):
+                    mark_rest_auth_success()
+                else:
+                    today_history_error = str(
+                        today_history_response
+                    )
+            except Exception as error:
+                today_history_error = str(error)
+
+    if (
+        requests_today_history
+        and isinstance(today_history_response, dict)
+        and today_history_response.get("s") == "ok"
+    ):
+        today_candles = today_history_response.get(
+            "candles",
+            [],
+        )
+
+        if isinstance(today_candles, list) and today_candles:
+            response = dict(response)
+            response["candles"] = (
+                list(response.get("candles", []))
+                + today_candles
+            )
+
     merged_response = dict(response)
 
     if resolution == "5" and include_oi == 0:
-        historical_candles = response.get("candles", [])
+        historical_candles = response.get(
+            "candles",
+            [],
+        )
+
+        if not isinstance(historical_candles, list):
+            historical_candles = []
 
         live_candles = []
 
@@ -1444,11 +1427,17 @@ def futures_history(
                 futures_live_candles.get(exact_symbol, {})
             )
 
-        # P3P10 diagnostic only: expose live accumulator state.
-        merged_response["live_symbol_present"] = bool(symbol_candles)
-        merged_response["live_candle_count"] = len(symbol_candles)
+        # P3P10 diagnostic: expose live accumulator state.
+        merged_response["live_symbol_present"] = bool(
+            symbol_candles
+        )
+        merged_response["live_candle_count"] = len(
+            symbol_candles
+        )
         merged_response["live_latest_timestamp"] = (
-            max(symbol_candles.keys()) if symbol_candles else None
+            max(symbol_candles.keys())
+            if symbol_candles
+            else None
         )
 
         for candle in symbol_candles.values():
@@ -1470,20 +1459,41 @@ def futures_history(
                     ]
                 )
 
-        merged_candles = list(historical_candles)
+        # Merge by timestamp. Live WebSocket data wins for the
+        # current bucket because it is the newest OHLC snapshot.
+        merged_by_timestamp = {}
 
-        historical_timestamps = {
-            int(candle[0])
-            for candle in merged_candles
-            if isinstance(candle, list) and candle
-        }
+        for candle in historical_candles:
+            if isinstance(candle, list) and candle:
+                merged_by_timestamp[int(candle[0])] = candle
 
         for candle in live_candles:
-            if candle[0] not in historical_timestamps:
-                merged_candles.append(candle)
+            merged_by_timestamp[int(candle[0])] = candle
 
-        merged_candles.sort(key=lambda candle: int(candle[0]))
+        merged_candles = sorted(
+            merged_by_timestamp.values(),
+            key=lambda candle: int(candle[0]),
+        )
+
         merged_response["candles"] = merged_candles
+
+        merged_response["today_history_requested"] = (
+            requests_today_history
+        )
+
+        merged_response["today_history_candle_count"] = (
+            len(today_history_response.get("candles", []))
+            if (
+                isinstance(today_history_response, dict)
+                and today_history_response.get("s") == "ok"
+            )
+            else 0
+        )
+
+        if today_history_error is not None:
+            merged_response["today_history_error"] = (
+                today_history_error
+            )
 
         return {
             "status": "ok",
