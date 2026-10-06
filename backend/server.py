@@ -34,7 +34,6 @@ SYMBOLS = [
 futures_subscriptions = set()
 futures_subscriptions_lock = threading.Lock()
 
-_load_futures_live_state()
 
 latest_quotes = {}
 lock = threading.Lock()
@@ -223,6 +222,10 @@ def _load_futures_live_state():
         )
 
 
+
+
+# Restore persisted futures state after loader definition.
+_load_futures_live_state()
 
 def _futures_live_bucket(timestamp):
     """Return the start epoch of the 5-minute bucket."""
