@@ -1380,8 +1380,7 @@ def futures_history(
     historical_range_to = range_to
 
     if (
-        resolution != "D"
-        and include_oi == 0
+        include_oi == 0
         and range_to_epoch >= today_start_epoch
     ):
         historical_range_to = str(yesterday_end_epoch)
