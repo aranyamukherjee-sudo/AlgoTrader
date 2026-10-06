@@ -1510,7 +1510,11 @@ def history(
     resolution: str = "5",
     days: int = 5,
 ):
-    allowed_symbols = set(SYMBOLS)
+    # Permanent index symbols plus dynamically discovered futures.
+    # Futures contracts are intentionally not hard-coded here because
+    # the active contract changes by expiry.
+    with futures_subscriptions_lock:
+        allowed_symbols = set(SYMBOLS) | set(futures_subscriptions)
 
     if symbol not in allowed_symbols:
         return {
