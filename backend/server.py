@@ -1184,6 +1184,90 @@ def futures_chain(
         }
 
 
+@app.get("/diagnostic/fyers-today-futures")
+def diagnostic_fyers_today_futures(
+    symbol: str,
+    range_from: str,
+    range_to: str,
+):
+    """
+    Temporary diagnostic only.
+
+    Calls FYERS F&O historical data directly without the normal
+    current-day clamp used by /futures/history.
+
+    Returns candle metadata only; never exposes credentials or the
+    raw FYERS response.
+    """
+    if not history_client:
+        return {
+            "status": "error",
+            "message": "FYERS F&O client not ready",
+        }
+
+    try:
+        from_epoch = int(range_from)
+        to_epoch = int(range_to)
+    except ValueError:
+        return {
+            "status": "error",
+            "message": "Invalid epoch range",
+        }
+
+    if to_epoch <= from_epoch:
+        return {
+            "status": "error",
+            "message": "range_to must be greater than range_from",
+        }
+
+    data = {
+        "symbol": symbol.strip(),
+        "resolution": "5",
+        "date_format": 0,
+        "range_from": str(from_epoch),
+        "range_to": str(to_epoch),
+        "include_oi": 0,
+        "include_greeks": 0,
+    }
+
+    try:
+        response = history_client.fno_historical_data(data=data)
+    except Exception as error:
+        return {
+            "status": "error",
+            "message": str(error),
+        }
+
+    if not isinstance(response, dict):
+        return {
+            "status": "error",
+            "message": "Invalid FYERS response",
+        }
+
+    candles = response.get("candles", [])
+
+    result = {
+        "status": "ok" if response.get("s") == "ok" else "fyers_error",
+        "symbol": symbol.strip(),
+        "range_from": str(from_epoch),
+        "range_to": str(to_epoch),
+        "fyers_status": response.get("s"),
+        "fyers_code": response.get("code"),
+        "candle_count": len(candles) if isinstance(candles, list) else 0,
+    }
+
+    if isinstance(candles, list) and candles:
+        first = candles[0]
+        last = candles[-1]
+
+        result["first_timestamp"] = first[0] if first else None
+        result["last_timestamp"] = last[0] if last else None
+        result["first_candle"] = first
+        result["last_candle"] = last
+
+    return result
+
+
 @app.get("/futures/history")
 def futures_history(
     symbol: str,
