@@ -85,6 +85,136 @@ FYERS_OAUTH_REDIRECT_URI_DEFAULT = (
 ALTRIXA_OAUTH_CALLBACK_URI = "altrixa://fyers-auth"
 
 
+# ------------------------------------------------------------
+# Live futures 5-minute candle aggregation
+# ------------------------------------------------------------
+#
+# FYERS SymbolUpdate provides real-time LTP plus cumulative
+# session volume.  We construct 5-minute OHLCV candles from
+# actual observations received by the backend.
+#
+# This is intentionally in-memory for Stage 1, just like the
+# existing historical cache.  Render restart/redeploy clears
+# the accumulated live candles.
+#
+# Key:
+#   symbol -> {
+#       bucket_timestamp: {
+#           "timestamp": <5-minute epoch bucket>,
+#           "open": <first LTP>,
+#           "high": <highest LTP>,
+#           "low": <lowest LTP>,
+#           "close": <latest LTP>,
+#           "volume": <derived bucket volume>
+#       },
+#       ...
+#   }
+#
+# Only actual FYERS SymbolUpdate observations are used.
+# No prices or volumes are fabricated.
+futures_live_candles = {}
+futures_live_candles_lock = threading.Lock()
+
+# Last cumulative FYERS session volume observed for each symbol.
+# Used to derive per-bucket traded volume.
+futures_live_volume_baseline = {}
+
+
+def _futures_live_bucket(timestamp):
+    """Return the start epoch of the 5-minute bucket."""
+    return int(timestamp) - (int(timestamp) % 300)
+
+
+def _update_futures_live_candle(message):
+    """
+    Update the live 5-minute candle for one FYERS SymbolUpdate.
+
+    Returns the updated candle, or None when the message does not
+    contain the fields required for a real candle observation.
+    """
+    symbol = message.get("symbol")
+    ltp = message.get("ltp")
+    market_timestamp = message.get("last_traded_time")
+
+    if not symbol or ltp is None or market_timestamp is None:
+        return None
+
+    try:
+        price = float(ltp)
+        timestamp = int(market_timestamp)
+    except (TypeError, ValueError):
+        return None
+
+    if price <= 0 or timestamp <= 0:
+        return None
+
+    cumulative_volume = message.get("vol_traded_today")
+
+    try:
+        cumulative_volume = (
+            int(cumulative_volume)
+            if cumulative_volume is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        cumulative_volume = None
+
+    bucket_timestamp = _futures_live_bucket(timestamp)
+
+    with futures_live_candles_lock:
+        symbol_candles = futures_live_candles.setdefault(symbol, {})
+
+        previous_cumulative = futures_live_volume_baseline.get(symbol)
+
+        if cumulative_volume is not None:
+            if previous_cumulative is None:
+                bucket_volume = 0
+            elif cumulative_volume >= previous_cumulative:
+                bucket_volume = cumulative_volume - previous_cumulative
+            else:
+                # FYERS session volume can reset after a reconnect/session
+                # boundary. Never manufacture negative volume.
+                bucket_volume = 0
+
+            futures_live_volume_baseline[symbol] = cumulative_volume
+        else:
+            bucket_volume = 0
+
+        existing = symbol_candles.get(bucket_timestamp)
+
+        if existing is None:
+            candle = {
+                "timestamp": bucket_timestamp,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": bucket_volume,
+            }
+        else:
+            candle = {
+                "timestamp": bucket_timestamp,
+                "open": existing["open"],
+                "high": max(existing["high"], price),
+                "low": min(existing["low"], price),
+                "close": price,
+                "volume": existing["volume"] + bucket_volume,
+            }
+
+        symbol_candles[bucket_timestamp] = candle
+
+        # Keep a bounded in-memory window.  This is intentionally much
+        # larger than one trading day but prevents an indefinitely growing
+        # Render process if a subscription remains active for weeks.
+        max_live_candles = 2000
+        if len(symbol_candles) > max_live_candles:
+            oldest = sorted(symbol_candles)[:-max_live_candles]
+            for old_timestamp in oldest:
+                symbol_candles.pop(old_timestamp, None)
+
+        return dict(candle)
+
+
 def on_message(message):
     symbol = message.get("symbol")
 
@@ -94,6 +224,22 @@ def on_message(message):
                 **message,
                 "received_at": datetime.now(timezone.utc).isoformat(),
             }
+
+        # Futures live candles are derived directly from the same
+        # untouched FYERS SymbolUpdate payload stored above.
+        #
+        # Snapshot the subscription membership under its lock, then
+        # release the lock before doing candle aggregation.
+        with futures_subscriptions_lock:
+            is_futures_subscription = symbol in futures_subscriptions
+
+        if (
+            message.get("type") == "sf"
+            and is_futures_subscription
+            and message.get("last_traded_time") is not None
+            and message.get("ltp") is not None
+        ):
+            _update_futures_live_candle(message)
 
 
 AUTH_ERROR_CODES = {-8, -15, -16, -17, -99}
@@ -1132,18 +1278,59 @@ def futures_history(
                 ),
             }
 
-    data = {
-        "symbol": exact_symbol,
-        "resolution": resolution,
-        "date_format": date_format,
-        "range_from": range_from,
-        "range_to": range_to,
-        "include_oi": include_oi,
-        "include_greeks": include_greeks,
-    }
+    # FYERS F&O intraday history does not reliably accept the
+    # current trading day. For 5-minute candles, request only
+    # completed historical time through the end of yesterday and
+    # merge today's real live candles from the WebSocket accumulator.
+    india_timezone = timezone(timedelta(hours=5, minutes=30))
+    now_india = datetime.now(india_timezone)
+    today_start_india = now_india.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    today_start_epoch = int(today_start_india.timestamp())
+    yesterday_end_epoch = today_start_epoch - 1
 
-    try:
-        response = history_client.fno_historical_data(data=data)
+    historical_range_to = range_to
+
+    if (
+        resolution == "5"
+        and include_oi == 0
+        and range_to_epoch >= today_start_epoch
+    ):
+        historical_range_to = str(yesterday_end_epoch)
+
+    today_only_live_range = (
+        resolution == "5"
+        and include_oi == 0
+        and range_from_epoch >= today_start_epoch
+    )
+
+    if today_only_live_range:
+        response = {
+            "s": "ok",
+            "candles": [],
+        }
+    else:
+        data = {
+            "symbol": exact_symbol,
+            "resolution": resolution,
+            "date_format": date_format,
+            "range_from": range_from,
+            "range_to": historical_range_to,
+            "include_oi": include_oi,
+            "include_greeks": include_greeks,
+        }
+
+        try:
+            response = history_client.fno_historical_data(data=data)
+        except Exception as error:
+            return {
+                "status": "error",
+                "message": str(error),
+            }
 
         if not isinstance(response, dict):
             return {
@@ -1161,6 +1348,52 @@ def futures_history(
 
         mark_rest_auth_success()
 
+    merged_response = dict(response)
+
+    if resolution == "5" and include_oi == 0:
+        historical_candles = response.get("candles", [])
+
+        live_candles = []
+
+        with futures_live_candles_lock:
+            symbol_candles = dict(
+                futures_live_candles.get(exact_symbol, {})
+            )
+
+        for candle in symbol_candles.values():
+            timestamp = int(candle["timestamp"])
+
+            if (
+                range_from_epoch
+                <= timestamp
+                <= range_to_epoch
+            ):
+                live_candles.append(
+                    [
+                        timestamp,
+                        candle["open"],
+                        candle["high"],
+                        candle["low"],
+                        candle["close"],
+                        candle["volume"],
+                    ]
+                )
+
+        merged_candles = list(historical_candles)
+
+        historical_timestamps = {
+            int(candle[0])
+            for candle in merged_candles
+            if isinstance(candle, list) and candle
+        }
+
+        for candle in live_candles:
+            if candle[0] not in historical_timestamps:
+                merged_candles.append(candle)
+
+        merged_candles.sort(key=lambda candle: int(candle[0]))
+        merged_response["candles"] = merged_candles
+
         return {
             "status": "ok",
             "symbol": exact_symbol,
@@ -1170,15 +1403,8 @@ def futures_history(
             "range_to": range_to,
             "include_oi": include_oi,
             "include_greeks": include_greeks,
-            "response": response,
+            "response": merged_response,
         }
-
-    except Exception as error:
-        return {
-            "status": "error",
-            "message": str(error),
-        }
-
 
 @app.get("/history")
 def history(
