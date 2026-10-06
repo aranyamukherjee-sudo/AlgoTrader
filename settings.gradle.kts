@@ -19,6 +19,7 @@ rootProject.name = "AlgoTrader"
 include(":app")
 include(":core:domain")
 include(":core:strategy")
+include(":core:intelligence")
 include(":core:execution")
 include(":core:marketdata")
 include(":strategy-engine")
