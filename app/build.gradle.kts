@@ -51,9 +51,11 @@ dependencies {
     implementation(project(":core:strategy"))
     implementation(project(":core:execution"))
     implementation(project(":core:marketdata"))
+    implementation(project(":core:intelligence"))
     implementation(project(":strategy-engine"))
     implementation(project(":backtest"))
     implementation(project(":data"))
+    implementation(project(":discovery"))
 
     // JVM unit tests for BacktestJobStore (cancel / delete / reload rules).
     // The real org.json replaces the android.jar stubs, which are not functional on the JVM.
