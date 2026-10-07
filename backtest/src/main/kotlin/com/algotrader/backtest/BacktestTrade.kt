@@ -35,6 +35,18 @@ data class BacktestTrade(
         }
 
     /**
+     * Deterministic round-trip research friction under the supplied model.
+     * Historical fill prices and [grossPnl] remain unchanged.
+     */
+    fun researchCosts(model: ResearchCostModel): Double = model.costs(this)
+
+    /**
+     * Cost-adjusted P&L. With the default zero-cost model this equals [grossPnl].
+     */
+    fun netPnl(model: ResearchCostModel): Double =
+        grossPnl - researchCosts(model)
+
+    /**
      * Contract value at entry (entry price x quantity). This is exposure, NOT
      * the margin or capital required to hold the position.
      */

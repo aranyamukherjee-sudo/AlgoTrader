@@ -148,7 +148,11 @@ class DiscoveryPipeline(private val generator: CandidateGenerator) {
             require(unknown.isEmpty()) { "candidate ${it.id} uses unsupported features $unknown" }
         }
 
-        val evaluator = SegmentEvaluator(request.backtestConfig, policy.consistencyPeriods)
+        val evaluator = SegmentEvaluator(
+            config = request.backtestConfig.copy(researchCostModel = policy.researchCostModel),
+            consistencyPeriods = policy.consistencyPeriods,
+            researchCostModel = policy.researchCostModel
+        )
         val log = ArrayList<PhaseRun>()
         val datasetFingerprint = request.split.fingerprint()
         val runKey = Hashing.short(

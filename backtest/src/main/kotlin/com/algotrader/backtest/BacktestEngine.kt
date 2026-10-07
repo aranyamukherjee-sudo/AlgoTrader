@@ -58,7 +58,8 @@ class BacktestEngine(
                 initialCapital = config.initialCapital,
                 finalEquity = finalEquity,
                 trades = trades,
-                equityCurve = equityCurve
+                equityCurve = equityCurve,
+                researchCostModel = config.researchCostModel
             )
 
             return BacktestResult(
@@ -184,7 +185,13 @@ class BacktestEngine(
         }
 
         val finalEquity = config.initialCapital + realizedPnl
-        val metrics = computePerformanceMetrics(config.initialCapital, finalEquity, trades, equityCurve)
+        val metrics = computePerformanceMetrics(
+            config.initialCapital,
+            finalEquity,
+            trades,
+            equityCurve,
+            config.researchCostModel
+        )
 
         return BacktestResult(
             strategyName = strategy.name,

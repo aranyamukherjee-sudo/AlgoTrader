@@ -13,7 +13,9 @@ package com.algotrader.backtest
 data class BacktestConfig(
     val initialCapital: Double = 100_000.0,
     val positionSizing: PositionSizing = PositionSizing.FixedQuantity(1.0),
-    val lotSize: Int = 1
+    val lotSize: Int = 1,
+    /** Generic deterministic research friction; zero preserves legacy behavior. */
+    val researchCostModel: ResearchCostModel = ResearchCostModel()
 ) {
     init {
         require(initialCapital > 0.0) { "initialCapital must be greater than zero" }

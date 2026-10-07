@@ -12,7 +12,8 @@ import com.algotrader.strategy.Strategy
  * existing backtest engine's result; nothing is re-derived here except
  * [periodConsistency].
  *
- * Not modelled: transaction costs, slippage, margin (the engine has none).
+ * Generic research costs/slippage are available through the backtest
+ * configuration; broker-specific charges and margin are not modelled here.
  */
 data class SegmentEvaluation(
     val role: SegmentRole,
@@ -20,6 +21,9 @@ data class SegmentEvaluation(
     val trades: Int,
     val netProfit: Double,
     val returnPercent: Double,
+    /** Cost-adjusted research result; defaults to the legacy net result. */
+    val costAdjustedNetProfit: Double = netProfit,
+    val costAdjustedReturnPercent: Double = returnPercent,
     val maxDrawdownPercent: Double,
     /** Null when there were no losing trades (undefined, not "infinite"). */
     val profitFactor: Double?,
@@ -36,7 +40,8 @@ data class SegmentEvaluation(
 
 class SegmentEvaluator(
     private val config: BacktestConfig = BacktestConfig(),
-    private val consistencyPeriods: Int = 4
+    private val consistencyPeriods: Int = 4,
+    private val researchCostModel: com.algotrader.backtest.ResearchCostModel = config.researchCostModel
 ) {
     init {
         require(consistencyPeriods >= 1) { "consistencyPeriods must be at least 1" }
@@ -51,6 +56,8 @@ class SegmentEvaluator(
             trades = m.totalTrades,
             netProfit = m.netProfit,
             returnPercent = m.totalReturnPercent,
+            costAdjustedNetProfit = m.costAdjustedNetProfit,
+            costAdjustedReturnPercent = m.costAdjustedReturnPercent,
             maxDrawdownPercent = m.maxDrawdownPercent,
             profitFactor = m.profitFactor,
             winRate = m.winRate,

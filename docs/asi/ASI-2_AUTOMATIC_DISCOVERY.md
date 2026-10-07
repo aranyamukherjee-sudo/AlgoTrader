@@ -41,4 +41,27 @@ policy, backtest config and candidate set. Time is injected (`DiscoveryRequest.a
 
 ## Deferred
 Short side, richer structure (swings, W/M, failed breakout, levels, OI/volume), regime and cross-contract
-robustness, cost sensitivity, walk-forward folds, persistence, any UI, live detection, execution.
+robustness, walk-forward folds, persistence, any UI, live detection, execution.
+
+
+## Robustness: deterministic research costs
+
+The first robustness increment adds an optional generic `ResearchCostModel` to
+the backtest engine. It models percentage commission, deterministic slippage
+friction in basis points, and a fixed round-trip cost.
+
+All defaults are zero, so existing backtests retain their historical results.
+ASI-2 can configure non-zero research friction through `DiscoveryPolicy` and
+uses the resulting cost-adjusted net profit for economic viability gates.
+
+In this first increment, the historical fill prices, equity curve, drawdown,
+profit factor, win rate, and trade-level quality statistics remain the
+legacy gross metrics. Only the economic net-profit viability gate is
+cost-adjusted. This keeps the increment deliberately scoped and preserves
+the existing backtest statistics while making friction sensitivity explicit.
+
+This model is deliberately broker- and instrument-agnostic. It is not a
+replacement for the authoritative F&O charge model; that remains a separate
+domain concern.
+
+Cost sensitivity is a robustness test, not proof of future profitability.

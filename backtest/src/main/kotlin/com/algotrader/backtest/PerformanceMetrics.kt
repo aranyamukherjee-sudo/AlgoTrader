@@ -10,6 +10,9 @@ data class PerformanceMetrics(
     val grossLoss: Double,
     val netProfit: Double,
     val totalReturnPercent: Double,
+    val researchCosts: Double = 0.0,
+    val costAdjustedNetProfit: Double = netProfit,
+    val costAdjustedReturnPercent: Double = 0.0,
     val maxDrawdown: Double,
     val maxDrawdownPercent: Double,
     val averageTradePnl: Double,
@@ -32,7 +35,8 @@ fun computePerformanceMetrics(
     initialCapital: Double,
     finalEquity: Double,
     trades: List<BacktestTrade>,
-    equityCurve: List<EquityPoint>
+    equityCurve: List<EquityPoint>,
+    researchCostModel: ResearchCostModel = ResearchCostModel()
 ): PerformanceMetrics {
     val winners = trades.filter { it.isWin }
     val losers = trades.filterNot { it.isWin }
@@ -40,7 +44,11 @@ fun computePerformanceMetrics(
     val grossProfit = winners.sumOf { it.grossPnl }
     val grossLoss = losers.sumOf { it.grossPnl } // <= 0.0
     val netProfit = finalEquity - initialCapital
+    val researchCosts = trades.sumOf { it.researchCosts(researchCostModel) }
+    val costAdjustedNetProfit = netProfit - researchCosts
     val totalReturnPercent = if (initialCapital == 0.0) 0.0 else netProfit / initialCapital * 100.0
+    val costAdjustedReturnPercent =
+        if (initialCapital == 0.0) 0.0 else costAdjustedNetProfit / initialCapital * 100.0
     val winRate = if (trades.isEmpty()) 0.0 else winners.size.toDouble() / trades.size
     val averageTradePnl = if (trades.isEmpty()) 0.0 else trades.sumOf { it.grossPnl } / trades.size
     val profitFactor = if (grossLoss == 0.0) null else grossProfit / -grossLoss
@@ -69,6 +77,9 @@ fun computePerformanceMetrics(
         grossLoss = grossLoss,
         netProfit = netProfit,
         totalReturnPercent = totalReturnPercent,
+        researchCosts = researchCosts,
+        costAdjustedNetProfit = costAdjustedNetProfit,
+        costAdjustedReturnPercent = costAdjustedReturnPercent,
         maxDrawdown = maxDrawdown,
         maxDrawdownPercent = maxDrawdownPercent,
         averageTradePnl = averageTradePnl,

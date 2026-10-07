@@ -1,5 +1,6 @@
 package com.algotrader.discovery.scoring
 
+import com.algotrader.backtest.ResearchCostModel
 import com.algotrader.discovery.evaluation.SegmentEvaluation
 import com.algotrader.discovery.split.SegmentRole
 
@@ -24,7 +25,9 @@ data class DiscoveryPolicy(
     /** Hard cap on candidates per run (limits the multiple-testing problem). */
     val maxCandidates: Int = 500,
     /** Confidence is never reported above this: evidence is never certainty. */
-    val maxConfidence: Double = 0.85
+    val maxConfidence: Double = 0.85,
+    /** Generic deterministic execution-friction assumptions for robustness research. */
+    val researchCostModel: ResearchCostModel = ResearchCostModel()
 ) {
     init {
         require(minTrainTrades >= 1 && minValidationTrades >= 1 && minHoldoutTrades >= 1) { "min trades must be at least 1" }
@@ -89,7 +92,12 @@ object DiscoveryGates {
         Gate(role, "trade_count", e.trades >= minTrades, "${e.trades} trades, need >= $minTrades")
 
     private fun netProfit(role: SegmentRole, e: SegmentEvaluation) =
-        Gate(role, "net_profit", e.netProfit > 0.0, "net profit ${fmt(e.netProfit)}, need > 0")
+        Gate(
+            role,
+            "net_profit",
+            e.costAdjustedNetProfit > 0.0,
+            "cost-adjusted net profit ${fmt(e.costAdjustedNetProfit)}, need > 0"
+        )
 
     private fun drawdown(role: SegmentRole, e: SegmentEvaluation, p: DiscoveryPolicy) =
         Gate(role, "drawdown", e.maxDrawdownPercent <= p.maxDrawdownPercent,

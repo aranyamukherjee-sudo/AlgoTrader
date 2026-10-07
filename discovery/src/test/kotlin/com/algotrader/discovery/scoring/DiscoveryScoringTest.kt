@@ -83,7 +83,10 @@ class DiscoveryScoringTest {
         val ok = eval(SegmentRole.HOLDOUT, trades = 10, net = 1.0, dd = 5.0)
         assertEquals(emptyList(), failed(DiscoveryGates.holdout(ok, policy)))
         assertEquals(listOf("trade_count"), failed(DiscoveryGates.holdout(ok.copy(trades = 9), policy)))
-        assertEquals(listOf("net_profit"), failed(DiscoveryGates.holdout(ok.copy(netProfit = 0.0), policy)))
+        assertEquals(
+            listOf("net_profit"),
+            failed(DiscoveryGates.holdout(ok.copy(netProfit = 0.0, costAdjustedNetProfit = 0.0), policy))
+        )
         assertEquals(listOf("drawdown"), failed(DiscoveryGates.holdout(ok.copy(maxDrawdownPercent = 30.0), policy)))
     }
 
@@ -157,4 +160,30 @@ class DiscoveryScoringTest {
         assertEquals(0.0, SegmentEvaluator.periodConsistency(emptyList(), 100, 4))
         assertFalse(SegmentEvaluator.periodConsistency(trades, 100, 4) > 0.75)
     }
+    
+    @Test
+    fun `cost-adjusted net profit gate can reject a gross profitable result`() {
+        val grossProfitable = SegmentEvaluation(
+            role = SegmentRole.HOLDOUT,
+            bars = 100,
+            trades = 10,
+            netProfit = 100.0,
+            returnPercent = 0.1,
+            costAdjustedNetProfit = -1.0,
+            costAdjustedReturnPercent = -0.001,
+            maxDrawdownPercent = 1.0,
+            profitFactor = 1.2,
+            winRate = 0.6,
+            averageTradePnl = 10.0,
+            periodConsistency = 0.75
+        )
+
+        val result = DiscoveryGates.holdout(grossProfitable, policy)
+
+        assertFalse(
+            result.all { it.passed },
+            "A gross-profitable segment must fail when its cost-adjusted net profit is non-positive"
+        )
+    }
+
 }
