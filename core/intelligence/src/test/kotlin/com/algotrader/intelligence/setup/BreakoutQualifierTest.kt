@@ -343,4 +343,281 @@ class BreakoutQualifierTest {
 
         assertEquals(first, second)
     }
+
+    @Test
+    fun `break distance passes exactly at threshold`() {
+        val c = candles(listOf(99.0, 102.0))
+        val result = BreakoutQualifier.qualify(
+            c,
+            structure(c),
+            breakout(c, BreakoutDirection.UP, 100.0, 1),
+            QualificationConfig(
+                minBreakDistance = BufferRule(absolute = 2.0)
+            )
+        )
+
+        val check = result.checks.first {
+            it.criterion == QualificationCriterion.BREAK_DISTANCE
+        }
+
+        assertEquals(CheckStatus.PASS, check.status)
+        assertEquals(2.0, check.observed)
+        assertEquals(2.0, check.requiredValue)
+    }
+
+    @Test
+    fun `close location fails below configured threshold`() {
+        val c = candles(listOf(99.0, 100.2, 102.0)).mapIndexed { i, candle ->
+            if (i == 1) {
+                candle.copy(
+                    high = 102.0,
+                    low = 100.0
+                )
+            } else {
+                candle
+            }
+        }
+
+        val result = BreakoutQualifier.qualify(
+            c,
+            structure(c),
+            breakout(c, BreakoutDirection.UP, 100.0, 1),
+            QualificationConfig(minCloseLocation = 0.8)
+        )
+
+        val check = result.checks.first {
+            it.criterion == QualificationCriterion.CLOSE_LOCATION
+        }
+
+        assertEquals(CheckStatus.FAIL, check.status)
+        assertNotNull(check.observed)
+        assertTrue(kotlin.math.abs(check.observed!! - 0.1) < 1e-9)
+        assertEquals(0.8, check.requiredValue)
+        assertEquals(QualificationStatus.UNQUALIFIED, result.status)
+    }
+
+    @Test
+    fun `range expansion fails below configured threshold`() {
+        val c = candles(
+            closes = List(15) { 100.0 },
+        ).mapIndexed { i, candle ->
+            if (i == 14) {
+                candle.copy(
+                    high = 101.0,
+                    low = 99.0,
+                    close = 100.0
+                )
+            } else {
+                candle
+            }
+        }
+
+        val result = BreakoutQualifier.qualify(
+            c,
+            structure(c),
+            breakout(c, BreakoutDirection.UP, 99.0, 14),
+            QualificationConfig(
+                minRangeAtr = 2.0,
+                atrPeriod = 5
+            )
+        )
+
+        val check = result.checks.first {
+            it.criterion == QualificationCriterion.RANGE_EXPANSION
+        }
+
+        assertEquals(CheckStatus.FAIL, check.status)
+        assertNotNull(check.observed)
+        assertEquals(2.0, check.requiredValue)
+        assertEquals(QualificationStatus.UNQUALIFIED, result.status)
+    }
+
+    @Test
+    fun `volume fails below configured ratio`() {
+        val c = candles(
+            closes = listOf(99.0, 101.0, 102.0, 103.0),
+            volumes = listOf(100.0, 100.0, 120.0, 100.0)
+        )
+
+        val result = BreakoutQualifier.qualify(
+            c,
+            structure(c),
+            breakout(c, BreakoutDirection.UP, 100.0, 2),
+            QualificationConfig(
+                volume = VolumeRule(
+                    lookback = 2,
+                    minRatio = 1.5
+                )
+            )
+        )
+
+        val check = result.checks.first {
+            it.criterion == QualificationCriterion.VOLUME_CONFIRMATION
+        }
+
+        assertEquals(CheckStatus.FAIL, check.status)
+        assertEquals(1.2, check.observed)
+        assertEquals(1.5, check.requiredValue)
+        assertEquals(QualificationStatus.UNQUALIFIED, result.status)
+    }
+
+    @Test
+    fun `volume is unavailable when lookback history is insufficient`() {
+        val c = candles(listOf(99.0, 101.0))
+
+        val result = BreakoutQualifier.qualify(
+            c,
+            structure(c),
+            breakout(c, BreakoutDirection.UP, 100.0, 1),
+            QualificationConfig(
+                volume = VolumeRule(
+                    lookback = 3,
+                    minRatio = 1.5
+                )
+            )
+        )
+
+        val check = result.checks.first {
+            it.criterion == QualificationCriterion.VOLUME_CONFIRMATION
+        }
+
+        assertEquals(true, check.required)
+        assertEquals(CheckStatus.UNAVAILABLE, check.status)
+        assertEquals(QualificationStatus.UNQUALIFIED, result.status)
+    }
+
+    @Test
+    fun `volume is unavailable when prior average volume is zero`() {
+        val c = candles(
+            closes = listOf(99.0, 101.0, 102.0),
+            volumes = listOf(0.0, 0.0, 300.0)
+        )
+
+        val result = BreakoutQualifier.qualify(
+            c,
+            structure(c),
+            breakout(c, BreakoutDirection.UP, 100.0, 2),
+            QualificationConfig(
+                volume = VolumeRule(
+                    lookback = 2,
+                    minRatio = 1.5
+                )
+            )
+        )
+
+        val check = result.checks.first {
+            it.criterion == QualificationCriterion.VOLUME_CONFIRMATION
+        }
+
+        assertEquals(CheckStatus.UNAVAILABLE, check.status)
+        assertEquals(QualificationStatus.UNQUALIFIED, result.status)
+    }
+
+    @Test
+    fun `trend alignment can be optional`() {
+        val c = candles(listOf(99.0, 101.0, 102.0))
+        val downTrend = structure(
+            c,
+            listOf(
+                pivot(PivotType.HIGH, 0, 0, 100.0, c)
+                    .copy(label = StructureLabel.LH),
+                pivot(PivotType.LOW, 1, 1, 99.0, c)
+                    .copy(label = StructureLabel.LL)
+            )
+        )
+
+        val result = BreakoutQualifier.qualify(
+            c,
+            downTrend,
+            breakout(c, BreakoutDirection.UP, 100.0, 1),
+            QualificationConfig(
+                requireTrendAlignment = false,
+                minBreakDistance = BufferRule(absolute = 0.5)
+            )
+        )
+
+        val trendCheck = result.checks.first {
+            it.criterion == QualificationCriterion.TREND_ALIGNMENT
+        }
+
+        assertEquals(false, trendCheck.required)
+        assertEquals(CheckStatus.FAIL, trendCheck.status)
+        assertEquals(
+            QualificationStatus.QUALIFIED,
+            result.status
+        )
+    }
+
+    @Test
+    fun `future confirmed pivot does not affect trend as of breakout`() {
+        val c = candles(List(8) { 100.0 + it })
+
+        val firstHigh = pivot(
+            PivotType.HIGH,
+            index = 0,
+            confirmedIndex = 0,
+            price = 100.0,
+            candles = c
+        ).copy(label = StructureLabel.FIRST)
+
+        val higherHigh = pivot(
+            PivotType.HIGH,
+            index = 1,
+            confirmedIndex = 1,
+            price = 101.0,
+            candles = c
+        ).copy(label = StructureLabel.HH)
+
+        val firstLow = pivot(
+            PivotType.LOW,
+            index = 0,
+            confirmedIndex = 0,
+            price = 99.0,
+            candles = c
+        ).copy(label = StructureLabel.FIRST)
+
+        val higherLow = pivot(
+            PivotType.LOW,
+            index = 2,
+            confirmedIndex = 2,
+            price = 100.0,
+            candles = c
+        ).copy(label = StructureLabel.HL)
+
+        val futureLowerLow = pivot(
+            PivotType.LOW,
+            index = 6,
+            confirmedIndex = 6,
+            price = 98.0,
+            candles = c
+        ).copy(label = StructureLabel.LL)
+
+        val result = BreakoutQualifier.qualify(
+            c,
+            structure(
+                c,
+                listOf(
+                    firstHigh,
+                    higherHigh,
+                    firstLow,
+                    higherLow,
+                    futureLowerLow
+                )
+            ),
+            breakout(c, BreakoutDirection.UP, 100.0, 3),
+            QualificationConfig()
+        )
+
+        val trendCheck = result.checks.first {
+            it.criterion == QualificationCriterion.TREND_ALIGNMENT
+        }
+
+        assertEquals(MarketStructureState.UPTREND, trendCheck.trendState)
+        assertEquals(CheckStatus.PASS, trendCheck.status)
+        assertEquals(
+            QualificationStatus.QUALIFIED,
+            result.status
+        )
+    }
+
 }
