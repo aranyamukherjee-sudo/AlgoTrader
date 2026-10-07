@@ -35,9 +35,10 @@ internal object DiscoveryPromotion {
         score: CandidateScore,
         policy: DiscoveryPolicy,
         runKey: String,
-        at: Instant
+        at: Instant,
+        walkForward: WalkForwardEvaluation? = null
     ): CandidateRecord {
-        val items = evidence(dna.ref, train, validation, holdout, runKey, at)
+        val items = evidence(dna.ref, train, validation, holdout, runKey, at, walkForward)
         val finalDna = dna.copy(evidenceRefs = items.map { it.id })
 
         var record = StrategyRecord(finalDna, createdAt = at)
@@ -59,7 +60,8 @@ internal object DiscoveryPromotion {
             score = score,
             evidence = record.evidence,
             confidence = confidence(score, policy, at),
-            strategyRecord = record
+            strategyRecord = record,
+            walkForward = walkForward
         )
     }
 
@@ -81,7 +83,8 @@ internal object DiscoveryPromotion {
         validation: SegmentEvaluation,
         holdout: SegmentEvaluation,
         runKey: String,
-        at: Instant
+        at: Instant,
+        walkForward: WalkForwardEvaluation?
     ): List<EvidenceItem> {
         fun id(tag: String) = EvidenceRef("${ref.id.value}.v${ref.version}.$tag")
         fun source(type: EvidenceSourceType, phase: String) =
@@ -125,6 +128,34 @@ internal object DiscoveryPromotion {
             source = source(EvidenceSourceType.VALIDATION_RUN, "holdout"), recordedAt = at,
             value = holdout.returnPercent, unit = EvidenceUnit.PERCENT, observations = holdout.trades
         )
+
+        walkForward?.folds?.forEach { fold ->
+            val prefix = "wf_fold_${fold.foldIndex}"
+            items += EvidenceItem(
+                id = id("${prefix}_validation"),
+                strategy = ref,
+                kind = EvidenceKind.HISTORICAL_EDGE,
+                sample = EvidenceSample.VALIDATION,
+                summary = "Walk-forward fold ${fold.foldIndex}: validation ${fold.validation.trades} trades, return ${fold.validation.returnPercent}%.",
+                source = source(EvidenceSourceType.VALIDATION_RUN, prefix),
+                recordedAt = at,
+                value = fold.validation.returnPercent,
+                unit = EvidenceUnit.PERCENT,
+                observations = fold.validation.trades
+            )
+            items += EvidenceItem(
+                id = id("${prefix}_consistency"),
+                strategy = ref,
+                kind = EvidenceKind.CONSISTENCY,
+                sample = EvidenceSample.VALIDATION,
+                summary = "Walk-forward fold ${fold.foldIndex}: validation consistency ${fold.validation.periodConsistency}.",
+                source = source(EvidenceSourceType.VALIDATION_RUN, prefix),
+                recordedAt = at,
+                value = fold.validation.periodConsistency,
+                unit = EvidenceUnit.RATIO
+            )
+        }
+
         return items
     }
 }

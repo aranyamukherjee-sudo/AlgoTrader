@@ -125,6 +125,21 @@ data class CandidateScore(val value: Double, val components: Map<String, Double>
 
 object DiscoveryScoring {
 
+    fun aggregateWalkForward(foldScores: List<CandidateScore>): CandidateScore {
+        require(foldScores.isNotEmpty()) { "walk-forward requires at least one fold score" }
+
+        val keys = foldScores.flatMap { it.components.keys }.toSet().sorted()
+        val components = linkedMapOf<String, Double>()
+        for (key in keys) {
+            components[key] = foldScores.minOf { it.components[key] ?: 0.0 }
+        }
+
+        return CandidateScore(
+            value = foldScores.minOf { it.value },
+            components = components
+        )
+    }
+
     fun score(train: SegmentEvaluation, validation: SegmentEvaluation, p: DiscoveryPolicy): CandidateScore {
         val components = linkedMapOf(
             // enough trades to mean something: full marks at twice the minimum

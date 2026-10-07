@@ -60,7 +60,22 @@ class BacktestJobStoreCancelDeleteTest {
         finalEquity = 100_000.0,
         trades = emptyList(),
         equityCurve = emptyList(),
-        metrics = PerformanceMetrics(0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, null, null, null),
+        metrics = PerformanceMetrics(
+            totalTrades = 0,
+            winningTrades = 0,
+            losingTrades = 0,
+            winRate = 0.0,
+            grossProfit = 0.0,
+            grossLoss = 0.0,
+            netProfit = 0.0,
+            totalReturnPercent = 0.0,
+            maxDrawdown = 0.0,
+            maxDrawdownPercent = 0.0,
+            averageTradePnl = 0.0,
+            profitFactor = null,
+            averageWinningTrade = null,
+            averageLosingTrade = null
+        ),
         sample = sample
     )
 

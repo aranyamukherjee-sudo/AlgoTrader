@@ -33,7 +33,9 @@ data class DiscoveryRequest(
     val at: Instant,
     val policy: DiscoveryPolicy = DiscoveryPolicy(),
     val backtestConfig: BacktestConfig = BacktestConfig(),
-    val registry: FeatureRegistry = FeatureRegistry.standard()
+    val registry: FeatureRegistry = FeatureRegistry.standard(),
+    /** Optional ASI-2 walk-forward validation over the research region. */
+    val walkForward: WalkForwardConfig? = null
 )
 
 /** How far a candidate got. Anything other than PROMISING is a rejected research result. */
@@ -45,7 +47,8 @@ data class PhaseRun(
     val candidate: StrategyId,
     val firstTimestamp: Instant,
     val lastTimestamp: Instant,
-    val bars: Int
+    val bars: Int,
+    val foldIndex: Int? = null
 )
 
 /**
@@ -65,7 +68,8 @@ data class CandidateRecord(
     val score: CandidateScore?,
     val evidence: EvidenceLedger,
     val confidence: ConfidenceReading?,
-    val strategyRecord: StrategyRecord?
+    val strategyRecord: StrategyRecord?,
+    val walkForward: WalkForwardEvaluation? = null
 ) {
     val isPromising: Boolean get() = stage == DiscoveryStage.PROMISING
 
@@ -161,13 +165,26 @@ class DiscoveryPipeline(private val generator: CandidateGenerator) {
                 policy.toString(),
                 request.backtestConfig.toString(),
                 request.timeframe.toString(),
+                request.walkForward?.toString() ?: "walkForward=off",
                 dnas.joinToString(";") { DnaCanonical.key(it) }
             ).joinToString("|")
         )
 
-        fun evaluateOn(role: SegmentRole, dna: StrategyDna, strategy: RuleStrategy): SegmentEvaluation {
-            val candles = request.split.segment(role)
-            log += PhaseRun(role, dna.id, candles.first().timestamp, candles.last().timestamp, candles.size)
+        fun evaluateOn(
+            role: SegmentRole,
+            dna: StrategyDna,
+            strategy: RuleStrategy,
+            candles: List<com.algotrader.domain.Candle>,
+            foldIndex: Int? = null
+        ): SegmentEvaluation {
+            log += PhaseRun(
+                role,
+                dna.id,
+                candles.first().timestamp,
+                candles.last().timestamp,
+                candles.size,
+                foldIndex
+            )
             return evaluator.evaluate(role, strategy, candles)
         }
 
@@ -175,32 +192,154 @@ class DiscoveryPipeline(private val generator: CandidateGenerator) {
         for (dna in dnas) {
             val strategy = RuleStrategy(dna, request.registry)
 
-            val train = evaluateOn(SegmentRole.TRAIN, dna, strategy)
+            val train = evaluateOn(
+                SegmentRole.TRAIN,
+                dna,
+                strategy,
+                request.split.train
+            )
             val trainGates = DiscoveryGates.train(train, policy)
             if (trainGates.any { !it.passed }) {
                 records += rejectedRecord(dna, DiscoveryStage.REJECTED_TRAIN, train, null, null, trainGates, null)
                 continue
             }
 
-            val validation = evaluateOn(SegmentRole.VALIDATION, dna, strategy)
+            val validation = evaluateOn(
+                SegmentRole.VALIDATION,
+                dna,
+                strategy,
+                request.split.validation
+            )
             val validationGates = DiscoveryGates.validation(train, validation, policy)
             val gatesSoFar = trainGates + validationGates
             if (validationGates.any { !it.passed }) {
                 records += rejectedRecord(dna, DiscoveryStage.REJECTED_VALIDATION, train, validation, null, gatesSoFar, null)
                 continue
             }
-            val score = DiscoveryScoring.score(train, validation, policy)
+            val baseScore = DiscoveryScoring.score(train, validation, policy)
 
-            val holdout = evaluateOn(SegmentRole.HOLDOUT, dna, strategy)
+            val walkForward = request.walkForward?.let { wfConfig ->
+                val researchCandles = request.split.train + request.split.validation
+                val folds = com.algotrader.discovery.split.WalkForwardSplit.rolling(
+                    candles = researchCandles,
+                    trainBars = wfConfig.trainBars,
+                    validationBars = wfConfig.validationBars,
+                    stepBars = wfConfig.stepBars,
+                    embargoBars = wfConfig.embargoBars,
+                    minFolds = wfConfig.minFolds
+                )
+
+                val evaluated = ArrayList<WalkForwardFoldEvaluation>()
+
+                for (fold in folds) {
+                    val foldTrain = evaluateOn(
+                        SegmentRole.TRAIN,
+                        dna,
+                        strategy,
+                        fold.train,
+                        fold.index
+                    )
+                    val foldValidation = evaluateOn(
+                        SegmentRole.VALIDATION,
+                        dna,
+                        strategy,
+                        fold.validation,
+                        fold.index
+                    )
+
+                    val foldGates =
+                        DiscoveryGates.train(foldTrain, policy) +
+                        DiscoveryGates.validation(foldTrain, foldValidation, policy)
+
+                    val foldScore =
+                        if (foldGates.all { it.passed }) {
+                            DiscoveryScoring.score(foldTrain, foldValidation, policy)
+                        } else {
+                            null
+                        }
+
+                    evaluated += WalkForwardFoldEvaluation(
+                        foldIndex = fold.index,
+                        train = foldTrain,
+                        validation = foldValidation,
+                        gates = foldGates,
+                        score = foldScore
+                    )
+
+                    if (foldGates.any { !it.passed }) break
+                }
+
+                val wfGates = evaluated.flatMap { it.gates }
+                val aggregate =
+                    if (evaluated.isNotEmpty() && evaluated.all { it.passed }) {
+                        DiscoveryScoring.aggregateWalkForward(
+                            evaluated.mapNotNull { it.score }
+                        )
+                    } else {
+                        null
+                    }
+
+                WalkForwardEvaluation(
+                    folds = evaluated,
+                    aggregateScore = aggregate,
+                    gates = wfGates
+                )
+            }
+
+            if (walkForward != null && !walkForward.allPassed) {
+                val wfGates = gatesSoFar + walkForward.gates
+                records += rejectedRecord(
+                    dna,
+                    DiscoveryStage.REJECTED_VALIDATION,
+                    train,
+                    validation,
+                    null,
+                    wfGates,
+                    baseScore,
+                    walkForward
+                )
+                continue
+            }
+
+            val score = walkForward?.aggregateScore ?: baseScore
+
+            val holdout = evaluateOn(
+                SegmentRole.HOLDOUT,
+                dna,
+                strategy,
+                request.split.holdout
+            )
             val holdoutGates = DiscoveryGates.holdout(holdout, policy)
-            val allGates = gatesSoFar + holdoutGates
+            val allGates =
+                gatesSoFar +
+                (walkForward?.gates ?: emptyList()) +
+                holdoutGates
+
             if (holdoutGates.any { !it.passed }) {
-                records += rejectedRecord(dna, DiscoveryStage.REJECTED_HOLDOUT, train, validation, holdout, allGates, score)
+                records += rejectedRecord(
+                    dna,
+                    DiscoveryStage.REJECTED_HOLDOUT,
+                    train,
+                    validation,
+                    holdout,
+                    allGates,
+                    score,
+                    walkForward
+                )
                 continue
             }
 
             records += DiscoveryPromotion.promote(
-                dna, train, validation, holdout, allGates, score, policy, runKey, request.at
+                dna,
+                train,
+                validation,
+                holdout,
+                allGates,
+                score,
+                policy,
+                runKey,
+                request.at,
+                walkForward
             )
         }
 
@@ -228,6 +367,19 @@ class DiscoveryPipeline(private val generator: CandidateGenerator) {
         validation: SegmentEvaluation?,
         holdout: SegmentEvaluation?,
         gates: List<Gate>,
-        score: CandidateScore?
-    ) = CandidateRecord(dna, stage, train, validation, holdout, gates, score, EvidenceLedger(), null, null)
+        score: CandidateScore?,
+        walkForward: WalkForwardEvaluation? = null
+    ) = CandidateRecord(
+        dna,
+        stage,
+        train,
+        validation,
+        holdout,
+        gates,
+        score,
+        EvidenceLedger(),
+        null,
+        null,
+        walkForward
+    )
 }
