@@ -231,10 +231,32 @@ private var isHomeScreenActive = false
     // Example key: "NSE:NIFTY50-INDEX|1h"
     private val candlesByInstrument = mutableMapOf<String, List<Candle>>()
 
+    /*
+     * P3P10:
+     * Authoritative futures intraday source.
+     *
+     * Futures 15m/30m/1h candles are derived from real 5m candles
+     * returned by /futures/history. This prevents re-aggregating an
+     * already-aggregated chart series during refresh.
+     */
+    private val futures5mCandlesBySymbol =
+        mutableMapOf<String, List<Candle>>()
+
     // Prevent duplicate intraday history refreshes while a request is active.
     private val intradayRefreshInFlight = mutableSetOf<String>()
+
+    /*
+     * Prevent repeated history redraws for the same live candle bucket.
+     * WebSocket ticks can arrive many times per second while the current
+     * backend history bucket is still unchanged.
+     */
+    private val lastIntradayRefreshBucket = mutableMapOf<String, Long>()
     // Latest live LTP received over the websocket, per backend symbol.
     private val liveLtpByInstrument = mutableMapOf<String, Double>()
+
+    // Authoritative FYERS exchange/trade timestamp for the latest live quote.
+    // Used by the on-device candle aggregator instead of device wall-clock time.
+    private val liveTimestampByInstrument = mutableMapOf<String, Long>()
     // Previous trading day's close used as the header's daily Change/% Change
     // reference. This is intentionally independent of the selected intraday
     // chart timeframe and the live LTP.
@@ -266,14 +288,16 @@ private var isHomeScreenActive = false
     // Networking
     // ---------------------------------------------------------------------
 
-    private fun timeframeResolution(): String {
-        return when (selectedTimeframe) {
+    private fun timeframeResolution(
+        timeframe: String = selectedTimeframe
+    ): String {
+        return when (timeframe) {
             "5m" -> "5"
             "15m" -> "15"
             "30m" -> "30"
             "1h" -> "60"
             "1D" -> "D"
-            else -> error("Unsupported timeframe: $selectedTimeframe")
+            else -> error("Unsupported timeframe: $timeframe")
         }
     }
 
@@ -458,7 +482,14 @@ private var isHomeScreenActive = false
                             val symbol = item.optString("symbol").trim().uppercase()
                             if (!contractPattern.matches(symbol)) continue
 
-                            val expiry = item.optLong("expiry", 0L)
+                            // FYERS chain may encode expiry as either a JSON
+                            // number or a numeric string. Normalize both forms
+                            // explicitly; malformed/missing expiry remains rejected.
+                            val expiry = when (val rawExpiry = item.opt("expiry")) {
+                                is Number -> rawExpiry.toLong()
+                                is String -> rawExpiry.trim().toLongOrNull() ?: 0L
+                                else -> 0L
+                            }
                             if (expiry <= 0L) continue
 
                             contracts.add(
@@ -593,11 +624,17 @@ private var isHomeScreenActive = false
      * WebSocket subscription.
      */
     private fun subscribeToFuturesContract(contract: InstrumentInfo) {
+        val requestUrl =
+            "$BACKEND_HTTP_BASE/futures/subscribe" +
+                "?symbol=${android.net.Uri.encode(contract.backendSymbol)}"
+
+        android.util.Log.d(
+            "ALTRIXA_P3P10",
+            "FUTURES SUBSCRIBE REQUEST symbol=${contract.backendSymbol} url=$requestUrl"
+        )
+
         val request = Request.Builder()
-            .url(
-                "$BACKEND_HTTP_BASE/futures/subscribe" +
-                    "?symbol=${android.net.Uri.encode(contract.backendSymbol)}"
-            )
+            .url(requestUrl)
             .get()
             .build()
 
@@ -606,7 +643,11 @@ private var isHomeScreenActive = false
                 call: okhttp3.Call,
                 e: java.io.IOException
             ) {
-                // WebSocket reconnect logic remains unchanged.
+                android.util.Log.e(
+                    "ALTRIXA_P3P10",
+                    "FUTURES SUBSCRIBE FAILURE symbol=${contract.backendSymbol}: ${e.message}",
+                    e
+                )
             }
 
             override fun onResponse(
@@ -614,8 +655,16 @@ private var isHomeScreenActive = false
                 response: Response
             ) {
                 response.use {
-                    // The backend owns subscription state. No local
-                    // fabrication or retry loop is needed here.
+                    val body = response.body?.string().orEmpty()
+
+                    android.util.Log.d(
+                        "ALTRIXA_P3P10",
+                        "FUTURES SUBSCRIBE RESPONSE " +
+                            "symbol=${contract.backendSymbol} " +
+                            "http=${response.code} " +
+                            "successful=${response.isSuccessful} " +
+                            "body=$body"
+                    )
                 }
             }
         })
@@ -627,35 +676,220 @@ private var isHomeScreenActive = false
      */
     private fun futuresHistoryRangeDays(): Long = 100L
 
-    /**
-     * Build the exact F&O history request.
+    /*
+     * P3P10: Aggregate real futures 5m candles into the selected
+     * intraday timeframe using the NSE 09:15 IST session anchor.
      *
-     * FYERS rejects a range_to equal to the current/future date, so the
-     * request ends at yesterday 23:59:59 IST.
+     * Historical completed sessions remain bounded to 09:15-15:30 IST.
+     * Today's live futures candles are allowed beyond 15:30 because the
+     * backend merges the current live 5m feed into the history response.
      */
+    private fun aggregateFuturesIntradayCandles(
+        candles: List<Candle>,
+        timeframe: String
+    ): List<Candle> {
+        if (candles.isEmpty() || timeframe == "5m") {
+            return candles.sortedBy { it.timestamp }
+        }
+
+        val interval = timeframeToSeconds(timeframe)
+
+        if (interval <= 5L * 60L) {
+            return candles.sortedBy { it.timestamp }
+        }
+
+        val zone = java.time.ZoneId.of("Asia/Kolkata")
+        val today = java.time.LocalDate.now(zone)
+        val grouped = sortedMapOf<Long, MutableList<Candle>>()
+
+        for (candle in candles.sortedBy { it.timestamp }) {
+            val local =
+                java.time.Instant
+                    .ofEpochSecond(candle.timestamp)
+                    .atZone(zone)
+
+            val date = local.toLocalDate()
+
+            val sessionStart =
+                date
+                    .atTime(9, 15)
+                    .atZone(zone)
+                    .toEpochSecond()
+
+            val sessionEnd =
+                date
+                    .atTime(15, 30)
+                    .atZone(zone)
+                    .toEpochSecond()
+
+            /*
+             * Completed historical days use the normal NSE session.
+             *
+             * Today is special: the backend may contain the live 5m
+             * futures candle after 15:30, so retain today's candles
+             * through the current backend response.
+             */
+            if (candle.timestamp < sessionStart) {
+                continue
+            }
+
+            if (date != today && candle.timestamp >= sessionEnd) {
+                continue
+            }
+
+            val offset =
+                candle.timestamp - sessionStart
+
+            val bucket =
+                sessionStart +
+                    (offset / interval) * interval
+
+            grouped
+                .getOrPut(bucket) { mutableListOf() }
+                .add(candle)
+        }
+
+        return grouped.map { (bucket, group) ->
+            val first = group.first()
+            val last = group.last()
+
+            Candle(
+                timestamp = bucket,
+                open = first.open,
+                high = group.maxOf { it.high },
+                low = group.minOf { it.low },
+                close = last.close,
+                volume = group
+                    .sumOf { it.volume.toDouble() }
+                    .toFloat()
+            )
+        }
+    }
+
+    /*
+     * P3P10: Build one real daily futures candle from the underlying
+     * 5m candles. The candle timestamp is anchored to 09:15 IST so the
+     * daily bar remains aligned with the NSE trading session.
+     */
+    private fun aggregateFuturesDailyCandles(
+        candles: List<Candle>
+    ): List<Candle> {
+        if (candles.isEmpty()) {
+            return emptyList()
+        }
+
+        val zone = java.time.ZoneId.of("Asia/Kolkata")
+        val grouped = sortedMapOf<java.time.LocalDate, MutableList<Candle>>()
+
+        for (candle in candles.sortedBy { it.timestamp }) {
+            val local =
+                java.time.Instant
+                    .ofEpochSecond(candle.timestamp)
+                    .atZone(zone)
+
+            val date = local.toLocalDate()
+
+            val sessionStart =
+                date
+                    .atTime(9, 15)
+                    .atZone(zone)
+                    .toEpochSecond()
+
+            val sessionEnd =
+                date
+                    .atTime(15, 30)
+                    .atZone(zone)
+                    .toEpochSecond()
+
+            /*
+             * Keep the same session policy as intraday aggregation:
+             * historical days are limited to the completed NSE session;
+             * today's live candle may extend beyond 15:30.
+             */
+            val today = java.time.LocalDate.now(zone)
+
+            if (candle.timestamp < sessionStart) {
+                continue
+            }
+
+            if (date != today && candle.timestamp >= sessionEnd) {
+                continue
+            }
+
+            grouped
+                .getOrPut(date) { mutableListOf() }
+                .add(candle)
+        }
+
+        return grouped.map { (date, group) ->
+            val first = group.first()
+            val last = group.last()
+
+            Candle(
+                timestamp = date
+                    .atTime(9, 15)
+                    .atZone(zone)
+                    .toEpochSecond(),
+                open = first.open,
+                high = group.maxOf { it.high },
+                low = group.minOf { it.low },
+                close = last.close,
+                volume = group
+                    .sumOf { it.volume.toDouble() }
+                    .toFloat()
+            )
+        }
+    }
+
+    private fun normalizeFuturesCandles(
+        candles: List<Candle>,
+        timeframe: String
+    ): List<Candle> {
+        return when (timeframe) {
+            "5m" ->
+                candles.sortedBy { it.timestamp }
+
+            "15m", "30m", "1h" ->
+                aggregateFuturesIntradayCandles(
+                    candles,
+                    timeframe
+                )
+
+            "1D" ->
+                aggregateFuturesDailyCandles(candles)
+
+            else ->
+                candles.sortedBy { it.timestamp }
+        }
+    }
+
     private fun futuresHistoryUrl(
         symbol: String,
         resolution: String
     ): String {
         val ist = java.time.ZoneId.of("Asia/Kolkata")
-        val yesterday =
-            java.time.LocalDate.now(ist).minusDays(1)
+        val today =
+            java.time.LocalDate.now(ist)
 
         val rangeTo =
-            yesterday
-                .atTime(23, 59, 59)
-                .atZone(ist)
-                .toEpochSecond()
+            java.time.Instant.now().epochSecond
 
         val rangeFrom =
-            yesterday
+            today
                 .minusDays(futuresHistoryRangeDays() - 1L)
                 .atStartOfDay(ist)
                 .toEpochSecond()
 
+        /*
+         * Futures 1D is derived locally from the real 5m session candles.
+         * Request 5m source data instead of FYERS resolution=D.
+         */
+        val requestResolution =
+            if (resolution == "D") "5" else resolution
+
         return "$BACKEND_HTTP_BASE/futures/history" +
             "?symbol=${android.net.Uri.encode(symbol)}" +
-            "&resolution=${android.net.Uri.encode(resolution)}" +
+            "&resolution=${android.net.Uri.encode(requestResolution)}" +
             "&range_from=$rangeFrom" +
             "&range_to=$rangeTo" +
             "&date_format=0" +
@@ -669,7 +903,9 @@ private var isHomeScreenActive = false
         val requestedTimeframe = selectedTimeframe
         val cacheKey = "$requestedSymbol|$requestedTimeframe"
 
-        // 1) Memory cache — unchanged fast path.
+        // 1) Memory cache — render immediately.
+        // Futures must still refresh from the backend because today's
+        // authoritative 5-minute candles are merged there from the live feed.
         candlesByInstrument[cacheKey]?.let { cached ->
             if (cached.isNotEmpty()) {
                 setHeaderStatus(null)
@@ -677,6 +913,17 @@ private var isHomeScreenActive = false
                 if (requestedTimeframe != "1D") {
                     ensurePreviousDayCloseLoaded(instrument)
                 }
+
+                if (instrument.isFutures) {
+                    fetchHistoryFromBackend(
+                        instrument = instrument,
+                        requestedSymbol = requestedSymbol,
+                        requestedTimeframe = requestedTimeframe,
+                        cacheKey = cacheKey,
+                        showLoadingStatus = false
+                    )
+                }
+
                 return
             }
         }
@@ -701,8 +948,12 @@ private var isHomeScreenActive = false
                     }
 
                     val age = System.currentTimeMillis() - diskEntry.savedAt
-                    if (age >= DISK_CACHE_TTL_MS) {
-                        // Stale: refresh quietly, chart already showing data.
+
+                    if (instrument.isFutures || age >= DISK_CACHE_TTL_MS) {
+                        // Futures must always refresh quietly because the disk
+                        // cache can contain only completed historical candles
+                        // while today's live 5-minute candle is maintained by
+                        // the backend live-feed accumulator.
                         fetchHistoryFromBackend(
                             instrument = instrument,
                             requestedSymbol = requestedSymbol,
@@ -711,7 +962,6 @@ private var isHomeScreenActive = false
                             showLoadingStatus = false
                         )
                     }
-                    // else: fresh enough — no network request at all.
                 } else {
                     // 3) True cold miss (no memory, no valid disk cache).
                     fetchHistoryFromBackend(
@@ -1176,7 +1426,27 @@ private var isHomeScreenActive = false
         cacheKey: String,
         showLoadingStatus: Boolean
     ) {
-        val resolution = timeframeResolution()
+        /*
+         * Bind this request to the timeframe that created it.
+         *
+         * selectedTimeframe is mutable and can change while an HTTP
+         * request is in flight. requestedTimeframe is the selection
+         * associated with this request.
+         */
+        /*
+         * P3P10:
+         * Futures intraday history always comes from the authoritative
+         * 5m backend series. Larger timeframes are derived locally.
+         */
+        val resolution =
+            if (
+                instrument.isFutures &&
+                requestedTimeframe != "1D"
+            ) {
+                "5"
+            } else {
+                timeframeResolution(requestedTimeframe)
+            }
 
         if (showLoadingStatus) {
             setHeaderStatus("Loading ${instrument.displayName}…")
@@ -1195,6 +1465,16 @@ private var isHomeScreenActive = false
                     "&resolution=$resolution&days=$historyDays"
             }
 
+        if (
+            instrument.isFutures &&
+            showLoadingStatus &&
+            isStillCurrentSelection(requestedSymbol, requestedTimeframe)
+        ) {
+            setHeaderStatus(
+                "DIAG URL ${requestUrl.substringAfter("$BACKEND_HTTP_BASE")}"
+            )
+        }
+
         val request = Request.Builder()
             .url(requestUrl)
             .build()
@@ -1202,12 +1482,21 @@ private var isHomeScreenActive = false
         wsClient.newCall(request).enqueue(object : okhttp3.Callback {
 
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                android.util.Log.e(
+                    "ALTRIXA_P3P10",
+                    "HISTORY FAILURE " +
+                        "symbol=$requestedSymbol " +
+                        "requestedTf=$requestedTimeframe " +
+                        "resolution=$resolution " +
+                        "error=${e.javaClass.simpleName}: ${e.message}",
+                    e
+                )
+
                 runOnUiThread {
                     if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
-                        // Cached chart (memory or disk), if any, stays visible;
-                        // this just surfaces the error non-blockingly.
                         setHeaderStatus(
-                            "Network error: ${e.javaClass.simpleName} — ${e.message ?: "unknown"}"
+                            "P3P10 FAILURE ${requestedTimeframe} " +
+                                "${e.javaClass.simpleName}"
                         )
                     }
                 }
@@ -1215,6 +1504,29 @@ private var isHomeScreenActive = false
 
             override fun onResponse(call: okhttp3.Call, response: Response) {
                 response.use {
+                    android.util.Log.d(
+                        "ALTRIXA_P3P10",
+                        "HISTORY RESPONSE " +
+                            "symbol=$requestedSymbol " +
+                            "requestedTf=$requestedTimeframe " +
+                            "resolution=$resolution " +
+                            "http=${response.code} " +
+                            "successful=${response.isSuccessful}"
+                    )
+
+                    runOnUiThread {
+                        if (isStillCurrentSelection(
+                                requestedSymbol,
+                                requestedTimeframe
+                            )
+                        ) {
+                            setHeaderStatus(
+                                "P3P10 RESPONSE ${requestedTimeframe} " +
+                                    "HTTP ${response.code}"
+                            )
+                        }
+                    }
+
                     val body = response.body?.string() ?: ""
 
                     if (!response.isSuccessful) {
@@ -1238,12 +1550,71 @@ private var isHomeScreenActive = false
                             root.optJSONArray("candles")
                                 ?: root
                                     .optJSONObject("response")
+                                    ?.optJSONArray("candles")
+                                ?: root
+                                    .optJSONObject("response")
                                     ?.optJSONArray("data")
 
+                        if (instrument.isFutures) {
+                            val rawLastCandle =
+                                array?.optJSONArray(
+                                    (array.length() - 1).coerceAtLeast(0)
+                                )
+                            val rawLastTimestamp =
+                                rawLastCandle?.optLong(0, 0L) ?: 0L
+
+                            val rawDiag =
+                                "DIAG REQUEST_RESPONSE " +
+                                "TF=$requestedTimeframe " +
+                                "RES=$resolution " +
+                                "RAW=${array?.length() ?: 0} " +
+                                "RAW_LAST=$rawLastTimestamp"
+
+                            android.util.Log.d(
+                                "ALTRIXA_P3P10",
+                                rawDiag
+                            )
+
+                            if (
+                                isStillCurrentSelection(
+                                    requestedSymbol,
+                                    requestedTimeframe
+                                )
+                            ) {
+                                runOnUiThread {
+                                    if (
+                                        isStillCurrentSelection(
+                                            requestedSymbol,
+                                            requestedTimeframe
+                                        )
+                                    ) {
+                                        setHeaderStatus(rawDiag)
+                                    }
+                                }
+                            }
+                        }
+
                         if (array == null || array.length() == 0) {
+                            val backendStatus = root.optString("status", "unknown")
+                            val backendMessage =
+                                root.optString(
+                                    "message",
+                                    root.optJSONObject("response")
+                                        ?.optString("message", "")
+                                        ?: ""
+                                )
+
                             runOnUiThread {
-                                if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
-                                    setHeaderStatus("No candle data available")
+                                if (isStillCurrentSelection(
+                                        requestedSymbol,
+                                        requestedTimeframe
+                                    )
+                                ) {
+                                    setHeaderStatus(
+                                        "DIAG BACKEND ${requestedTimeframe} " +
+                                            "status=$backendStatus " +
+                                            "message=${backendMessage.ifBlank { "no candles" }}"
+                                    )
                                 }
                             }
                             return
@@ -1310,8 +1681,164 @@ private var isHomeScreenActive = false
                             return
                         }
 
-                        // Cache by both instrument and timeframe (memory).
-                        candlesByInstrument[cacheKey] = validCandles
+                        /*
+                         * P3P10:
+                         * Keep the backend's real 5m futures series as the
+                         * source of truth for subsequent refreshes.
+                         */
+                        if (
+                            instrument.isFutures &&
+                            requestedTimeframe != "1D"
+                        ) {
+                            futures5mCandlesBySymbol[
+                                requestedSymbol
+                            ] = validCandles
+                        }
+
+                        val todayRawCount =
+                            if (instrument.isFutures) {
+                                val zone =
+                                    java.time.ZoneId.of("Asia/Kolkata")
+                                val today =
+                                    java.time.LocalDate.now(zone)
+
+                                validCandles.count {
+                                    java.time.Instant
+                                        .ofEpochSecond(it.timestamp)
+                                        .atZone(zone)
+                                        .toLocalDate() == today
+                                }
+                            } else {
+                                0
+                            }
+
+                        val todayRawFirst =
+                            if (instrument.isFutures) {
+                                val zone =
+                                    java.time.ZoneId.of("Asia/Kolkata")
+                                val today =
+                                    java.time.LocalDate.now(zone)
+
+                                validCandles
+                                    .filter {
+                                        java.time.Instant
+                                            .ofEpochSecond(it.timestamp)
+                                            .atZone(zone)
+                                            .toLocalDate() == today
+                                    }
+                                    .minOfOrNull { it.timestamp } ?: 0L
+                            } else {
+                                0L
+                            }
+
+                        val todayRawLast =
+                            if (instrument.isFutures) {
+                                val zone =
+                                    java.time.ZoneId.of("Asia/Kolkata")
+                                val today =
+                                    java.time.LocalDate.now(zone)
+
+                                validCandles
+                                    .filter {
+                                        java.time.Instant
+                                            .ofEpochSecond(it.timestamp)
+                                            .atZone(zone)
+                                            .toLocalDate() == today
+                                    }
+                                    .maxOfOrNull { it.timestamp } ?: 0L
+                            } else {
+                                0L
+                            }
+
+                        if (instrument.isFutures) {
+                            android.util.Log.d(
+                                "ALTRIXA_P3P10",
+                                "DIAG BEFORE_NORMALIZE " +
+                                    "symbol=$requestedSymbol " +
+                                    "requestedTf=$requestedTimeframe " +
+                                    "resolution=$resolution " +
+                                    "validCount=${validCandles.size} " +
+                                    "first=${validCandles.firstOrNull()?.timestamp ?: 0L} " +
+                                    "last=${validCandles.lastOrNull()?.timestamp ?: 0L}"
+                            )
+                        }
+
+                        val renderedCandles =
+                            if (instrument.isFutures) {
+                                normalizeFuturesCandles(
+                                    validCandles,
+                                    requestedTimeframe
+                                )
+                            } else {
+                                validCandles
+                            }
+
+                        val todayRenderedCount =
+                            if (instrument.isFutures) {
+                                val zone =
+                                    java.time.ZoneId.of("Asia/Kolkata")
+                                val today =
+                                    java.time.LocalDate.now(zone)
+
+                                renderedCandles.count {
+                                    java.time.Instant
+                                        .ofEpochSecond(it.timestamp)
+                                        .atZone(zone)
+                                        .toLocalDate() == today
+                                }
+                            } else {
+                                0
+                            }
+
+                        if (
+                            instrument.isFutures &&
+                            isStillCurrentSelection(
+                                requestedSymbol,
+                                requestedTimeframe
+                            )
+                        ) {
+                            val diagnostic =
+                                "P3P10 " +
+                                "REQ=$requestedTimeframe " +
+                                "RES=$resolution " +
+                                "RAW=${validCandles.size} " +
+                                "TODAY_RAW=${todayRawCount} " +
+                                "RAW_FIRST=${todayRawFirst} " +
+                                "RAW_LAST=${todayRawLast} " +
+                                "RENDERED=${renderedCandles.size} " +
+                                "TODAY_RENDERED=${todayRenderedCount}"
+
+                            runOnUiThread {
+                                if (
+                                    isStillCurrentSelection(
+                                        requestedSymbol,
+                                        requestedTimeframe
+                                    )
+                                ) {
+                                    setHeaderStatus(diagnostic)
+                                }
+                            }
+                        }
+
+                        if (renderedCandles.isEmpty()) {
+                            runOnUiThread {
+                                if (
+                                    isStillCurrentSelection(
+                                        requestedSymbol,
+                                        requestedTimeframe
+                                    )
+                                ) {
+                                    setHeaderStatus(
+                                        "No valid candle data available"
+                                    )
+                                }
+                            }
+                            return
+                        }
+
+                        // Cache the exact series rendered by this timeframe.
+                        candlesByInstrument[cacheKey] =
+                            renderedCandles
 
                         // Persist to disk, atomically, off the main thread.
                         val savedAt = System.currentTimeMillis()
@@ -1330,16 +1857,38 @@ private var isHomeScreenActive = false
                             if (requestedTimeframe == "1D") {
                                 updatePreviousDayCloseFromDaily(
                                     requestedSymbol,
-                                    candles
+                                    renderedCandles
                                 )
                             }
 
                             if (isStillCurrentSelection(requestedSymbol, requestedTimeframe)) {
                                 setHeaderStatus(null)
-                                renderHomeData(candles)
+
+                                val firstTs =
+                                    renderedCandles.firstOrNull()?.timestamp ?: 0L
+                                val lastTs =
+                                    renderedCandles.lastOrNull()?.timestamp ?: 0L
+
+                                renderHomeData(renderedCandles)
+
+                                setHeaderStatus(
+                                    "DIAG ${requestedSymbol} ${requestedTimeframe} " +
+                                        "raw=${array.length()} " +
+                                        "source=${validCandles.size} " +
+                                        "rendered=${renderedCandles.size} " +
+                                        "first=$firstTs last=$lastTs"
+                                )
+
                                 if (requestedTimeframe != "1D") {
                                     ensurePreviousDayCloseLoaded(instrument)
                                 }
+                            } else {
+                                setHeaderStatus(
+                                    "DIAG DISCARDED ${requestedSymbol} " +
+                                        "${requestedTimeframe} " +
+                                        "selected=${selectedInstrument.backendSymbol} " +
+                                        "${selectedTimeframe}"
+                                )
                             }
                         }
 
@@ -1655,8 +2204,56 @@ private var isHomeScreenActive = false
      * WebSocket LTP remains responsible for the live price marker/current
      * candle between backend history refreshes.
      */
+    /*
+     * P3P10:
+     * Activity-side bucket calculation used by intraday history refresh.
+     *
+     * NSE intraday sessions are anchored at 09:15 IST:
+     * 30m -> 09:15, 09:45, 10:15, ...
+     * 60m -> 09:15, 10:15, 11:15, ...
+     */
+    private fun intradayRefreshBucketTimestamp(
+        timestampSeconds: Long,
+        interval: Long
+    ): Long {
+        if (interval >= 86400L) {
+            val zone =
+                java.time.ZoneId.of("Asia/Kolkata")
+
+            return java.time.Instant
+                .ofEpochSecond(timestampSeconds)
+                .atZone(zone)
+                .toLocalDate()
+                .atStartOfDay(zone)
+                .toEpochSecond()
+        }
+
+        val zone =
+            java.time.ZoneId.of("Asia/Kolkata")
+
+        val localDate =
+            java.time.Instant
+                .ofEpochSecond(timestampSeconds)
+                .atZone(zone)
+                .toLocalDate()
+
+        val sessionStart =
+            localDate
+                .atTime(9, 15)
+                .atZone(zone)
+                .toEpochSecond()
+
+        if (timestampSeconds >= sessionStart) {
+            val offset = timestampSeconds - sessionStart
+            return sessionStart + (offset / interval) * interval
+        }
+
+        return (timestampSeconds / interval) * interval
+    }
+
     private fun refreshIntradayHistoryIfNeeded(instrument: InstrumentInfo) {
         val timeframe = selectedTimeframe
+
         if (!isHomeScreenActive || timeframe == "1D") return
 
         val cacheKey = "${instrument.backendSymbol}|$timeframe"
@@ -1667,17 +2264,50 @@ private var isHomeScreenActive = false
         if (interval <= 0L) return
 
         val nowSeconds = System.currentTimeMillis() / 1000L
-        val currentBucket = (nowSeconds / interval) * interval
+        val currentBucket =
+            intradayRefreshBucketTimestamp(
+                nowSeconds,
+                interval
+            )
+
         val latestCachedBucket =
-            (cached.last().timestamp / interval) * interval
+            intradayRefreshBucketTimestamp(
+                cached.last().timestamp,
+                interval
+            )
 
         // Nothing is missing yet.
         if (currentBucket <= latestCachedBucket) return
 
+        /*
+         * The WebSocket can deliver many ticks during the same candle.
+         * Once a successful history refresh has already been performed for
+         * this bucket, do not redraw the complete chart again until the
+         * market advances into the next bucket.
+         */
+        if (lastIntradayRefreshBucket[cacheKey] == currentBucket) return
+
         // Avoid multiple refresh requests during the same gap.
         if (!intradayRefreshInFlight.add(cacheKey)) return
 
-        val resolution = timeframeResolution()
+        /*
+         * Use the timeframe captured at the beginning of this refresh.
+         * Do not re-read mutable selectedTimeframe while constructing
+         * the request.
+         */
+        /*
+         * P3P10:
+         * Refresh futures intraday from the authoritative 5m source.
+         */
+        val resolution =
+            if (
+                instrument.isFutures &&
+                timeframe != "1D"
+            ) {
+                "5"
+            } else {
+                timeframeResolution(timeframe)
+            }
 
         val requestUrl =
             if (instrument.isFutures) {
@@ -1721,6 +2351,9 @@ private var isHomeScreenActive = false
                             root.optJSONArray("candles")
                                 ?: root
                                     .optJSONObject("response")
+                                    ?.optJSONArray("candles")
+                                ?: root
+                                    .optJSONObject("response")
                                     ?.optJSONArray("data")
                                 ?: return
 
@@ -1754,6 +2387,33 @@ private var isHomeScreenActive = false
 
                         fresh.sortBy { it.timestamp }
 
+                        val diagZone =
+                            java.time.ZoneId.of("Asia/Kolkata")
+                        val diagToday =
+                            java.time.LocalDate.now(diagZone)
+
+                        val freshToday =
+                            fresh.filter {
+                                java.time.Instant
+                                    .ofEpochSecond(it.timestamp)
+                                    .atZone(diagZone)
+                                    .toLocalDate() == diagToday
+                            }
+
+                        android.util.Log.d(
+                            "ALTRIXA_P3P10",
+                            "FRESH_RESPONSE " +
+                                "symbol=${instrument.backendSymbol} " +
+                                "timeframe=$timeframe " +
+                                "resolution=$resolution " +
+                                "count=${fresh.size} " +
+                                "today=${freshToday.size} " +
+                                "first=${fresh.firstOrNull()?.timestamp ?: 0L} " +
+                                "last=${fresh.lastOrNull()?.timestamp ?: 0L} " +
+                                "todayFirst=${freshToday.firstOrNull()?.timestamp ?: 0L} " +
+                                "todayLast=${freshToday.lastOrNull()?.timestamp ?: 0L}"
+                        )
+
                         runOnUiThread {
                             try {
                                 if (!isStillCurrentSelection(
@@ -1764,16 +2424,51 @@ private var isHomeScreenActive = false
                                     return@runOnUiThread
                                 }
 
-                                val current = candlesByInstrument[cacheKey].orEmpty()
+                                val merged =
+                                    run {
+                                        val current =
+                                            candlesByInstrument[
+                                                cacheKey
+                                            ].orEmpty()
 
-                                // Fresh backend candles replace overlapping
-                                // timestamps while older cached history remains.
-                                val merged = (current + fresh)
-                                    .associateBy { it.timestamp }
-                                    .values
-                                    .sortedBy { it.timestamp }
+                                        val mergedCandles =
+                                            (current + fresh)
+                                                .filter(
+                                                    ::isValidCachedCandle
+                                                )
+                                                .associateBy {
+                                                    it.timestamp
+                                                }
+                                                .values
+                                                .sortedBy {
+                                                    it.timestamp
+                                                }
 
-                                candlesByInstrument[cacheKey] = merged
+                                        if (
+                                            instrument.isFutures &&
+                                            timeframe != "1D"
+                                        ) {
+                                            normalizeFuturesCandles(
+                                                mergedCandles,
+                                                timeframe
+                                            )
+                                        } else {
+                                            mergedCandles
+                                        }
+                                    }
+                                if (merged.isEmpty()) {
+                                    return@runOnUiThread
+                                }
+
+                                candlesByInstrument[cacheKey] =
+                                    merged
+
+                                /*
+                                 * Mark this bucket as successfully refreshed.
+                                 * Network/HTTP/parse failures do not reach this
+                                 * point, so they remain retryable.
+                                 */
+                                lastIntradayRefreshBucket[cacheKey] = currentBucket
 
                                 val savedAt = System.currentTimeMillis()
                                 diskCacheExecutor.execute {
@@ -1848,22 +2543,83 @@ private var isHomeScreenActive = false
                             }.distinctBy { it.backendSymbol }
 
                         for (instrument in subscribedInstruments) {
-                            val ltp = quotes.optJSONObject(instrument.backendSymbol)
-                                ?.optDouble("ltp", Double.NaN) ?: Double.NaN
+                            val quote =
+                                quotes.optJSONObject(instrument.backendSymbol)
+                                    ?: continue
+
+                            val ltp =
+                                quote.optDouble(
+                                    "ltp",
+                                    Double.NaN
+                                )
 
                             if (!ltp.isNaN()) {
-                                liveLtpByInstrument[instrument.backendSymbol] = ltp
+                                liveLtpByInstrument[
+                                    instrument.backendSymbol
+                                ] = ltp
+
+                                /*
+                                 * Prefer FYERS market-side timestamps for
+                                 * candle bucketing.
+                                 */
+                                val marketTimestamp =
+                                    listOf(
+                                        quote.optLong(
+                                            "last_traded_time",
+                                            0L
+                                        ),
+                                        quote.optLong(
+                                            "exch_feed_time",
+                                            0L
+                                        )
+                                    ).firstOrNull { it > 0L }
+
+                                if (marketTimestamp != null) {
+                                    liveTimestampByInstrument[
+                                        instrument.backendSymbol
+                                    ] = marketTimestamp
+                                }
                             }
                         }
 
                         runOnUiThread {
                             if (isHomeScreenActive) {
+                                val selectedSymbol =
+                                    selectedInstrument.backendSymbol
+
+                                val selectedLtp =
+                                    liveLtpByInstrument[selectedSymbol]
+
+                                if (selectedLtp != null) {
+                                    mainChartView?.setLatestPrice(
+                                        selectedLtp.toFloat(),
+                                        liveTimestampByInstrument[selectedSymbol]
+                                    )
+                                }
+
                                 updateHeaderPrice()
 
-                                // If the backend history has fallen behind the
-                                // live market bucket, quietly fill the gap
-                                // using authoritative OHLCV candles.
-                                refreshIntradayHistoryIfNeeded(selectedInstrument)
+                                /*
+                                 * Indexes retain the existing recent-history
+                                 * refresh path.
+                                 *
+                                 * Futures deliberately do not use this
+                                 * generic HTTP refresh on every WebSocket
+                                 * tick. Their 5-minute history endpoint
+                                 * already merges the backend live futures
+                                 * candle, while setLatestPrice() maintains
+                                 * the currently forming candle locally.
+                                 *
+                                 * Re-fetching and re-rendering the complete
+                                 * futures history on every quote can race
+                                 * with that live-candle path and cause
+                                 * unnecessary redraws/flicker.
+                                 */
+                                if (!selectedInstrument.isFutures) {
+                                    refreshIntradayHistoryIfNeeded(
+                                        selectedInstrument
+                                    )
+                                }
                             }
                         }
                     } catch (_: Exception) {
@@ -2660,6 +3416,29 @@ private var isHomeScreenActive = false
         val rsi = computeRsi(closes, 14)
         val isDaily = selectedTimeframe == "1D"
 
+        val renderZone =
+            java.time.ZoneId.of("Asia/Kolkata")
+        val renderToday =
+            java.time.LocalDate.now(renderZone)
+
+        val todayCandles =
+            orderedCandles.filter {
+                java.time.Instant
+                    .ofEpochSecond(it.timestamp)
+                    .atZone(renderZone)
+                    .toLocalDate() == renderToday
+            }
+
+        setHeaderStatus(
+            "DIAG RENDER ${selectedInstrument.backendSymbol} " +
+                "${selectedTimeframe} candles=${orderedCandles.size} " +
+                "TODAY=${todayCandles.size} " +
+                "first=${orderedCandles.firstOrNull()?.timestamp ?: 0L} " +
+                "last=${orderedCandles.lastOrNull()?.timestamp ?: 0L} " +
+                "todayFirst=${todayCandles.firstOrNull()?.timestamp ?: 0L} " +
+                "todayLast=${todayCandles.lastOrNull()?.timestamp ?: 0L}"
+        )
+
         mainChartView?.setData(
             candles = orderedCandles,
             ema20 = ema20,
@@ -2823,7 +3602,9 @@ private var isHomeScreenActive = false
             if (change >= 0) AltrixaColors.positive else AltrixaColors.negative
         )
 
-        mainChartView?.setLatestPrice(price)
+        if (liveLtp != null) {
+            mainChartView?.setLatestPrice(price)
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -2999,6 +3780,22 @@ private fun renderBacktestConfiguration() {
     selectedFuturesContract?.let { contract ->
         if (contract.contractLotSize == null) fetchFuturesContractMetadata(contract)
     }
+    // Keep the configuration UI on the same authoritative futures resolution
+    // used by runBacktest(). This avoids depending on selectedInstrument being
+    // the discovered futures contract at the exact moment the screen redraws.
+    val futuresResolution = futuresBacktestResolution()
+    val configurationLotSize = when (futuresResolution) {
+        is com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Resolved ->
+            futuresResolution.lotSize
+
+        is com.algotrader.app.backtest.BacktestInstrumentResolver.Resolution.Rejected ->
+            if (selectedInstrument.isFutures) {
+                selectedInstrument.contractLotSize ?: 1
+            } else {
+                selectedInstrument.lotSize
+            }
+    }
+
     BacktestScreen.renderConfig(
         this,
         content,
@@ -3009,13 +3806,10 @@ private fun renderBacktestConfiguration() {
         ]?.size ?: 0,
         initialCapital = 100_000.0,
         positionQuantity = 1.0,
-        // For a selected futures contract the lot-size input is its authoritative
-        // contract size (null -> 1 -> unit mode); its placeholder lotSize is never used.
-        lotSize = if (selectedInstrument.isFutures) {
-            selectedInstrument.contractLotSize ?: 1
-        } else {
-            selectedInstrument.lotSize
-        },
+        // For futures, use the authoritative resolver lot size. If metadata is
+        // unavailable, keep the safe UI placeholder of 1; futuresReady remains
+        // false, so the run is still blocked until the real lot size is known.
+        lotSize = configurationLotSize,
         instrumentType = com.algotrader.app.backtest.BacktestInstrumentType.INDEX,
         futuresNote = futuresBacktestNote(),
         futuresReady = futuresBacktestReady(),
@@ -4159,7 +4953,11 @@ class TradingChartView(context: android.content.Context) : View(context) {
                     candles.lastIndex
                 )
 
-            liveCandle = null
+            /*
+             * Preserve liveCandle during a background history refresh.
+             * The live candle belongs to the WebSocket stream and must not
+             * be discarded when historical data is refreshed.
+             */
         }
 
         invalidate()
@@ -4181,6 +4979,35 @@ class TradingChartView(context: android.content.Context) : View(context) {
                 .toEpochSecond()
         }
 
+        /*
+         * P3P10:
+         * NSE intraday buckets are anchored at 09:15 IST.
+         *
+         * 30m -> 09:15, 09:45, 10:15, ...
+         * 60m -> 09:15, 10:15, 11:15, ...
+         */
+        val zone = java.time.ZoneId.of("Asia/Kolkata")
+
+        val localDate =
+            java.time.Instant
+                .ofEpochSecond(timestampSeconds)
+                .atZone(zone)
+                .toLocalDate()
+
+        val sessionStart =
+            localDate
+                .atTime(9, 15)
+                .atZone(zone)
+                .toEpochSecond()
+
+        if (timestampSeconds >= sessionStart) {
+            val offset =
+                timestampSeconds - sessionStart
+
+            return sessionStart +
+                (offset / interval) * interval
+        }
+
         return (timestampSeconds / interval) * interval
     }
 
@@ -4189,7 +5016,10 @@ class TradingChartView(context: android.content.Context) : View(context) {
         invalidate()
     }
 
-    fun setLatestPrice(price: Float) {
+    fun setLatestPrice(
+        price: Float,
+        timestampSeconds: Long? = null
+    ) {
         if (!price.isFinite() || price <= 0f) return
 
         latestPrice = price
@@ -4197,24 +5027,26 @@ class TradingChartView(context: android.content.Context) : View(context) {
         val interval =
             candleIntervalSeconds.coerceAtLeast(60L)
 
-        val nowSeconds =
-            System.currentTimeMillis() / 1000L
+        /*
+         * Prefer the authoritative FYERS market timestamp.
+         * Fall back to device time only when no market timestamp exists.
+         */
+        val quoteTimestamp =
+            timestampSeconds
+                ?.takeIf { it > 0L }
+                ?: (System.currentTimeMillis() / 1000L)
 
         val bucketTimestamp =
             candleBucketTimestamp(
-                nowSeconds,
+                quoteTimestamp,
                 interval
             )
 
         /*
-         * No historical candles yet.
-         *
-         * Start a standalone live candle. Once historical
-         * data arrives, setData() will establish the normal
-         * historical -> live relationship.
+         * No historical candles yet: start a standalone live candle.
          */
         if (candles.isEmpty()) {
-            val candle =
+            liveCandle =
                 Candle(
                     timestamp = bucketTimestamp,
                     open = price,
@@ -4224,7 +5056,6 @@ class TradingChartView(context: android.content.Context) : View(context) {
                     volume = 0f
                 )
 
-            liveCandle = candle
             visibleCount = 1
             endIndex = 0
             followLatest = true
@@ -4233,8 +5064,7 @@ class TradingChartView(context: android.content.Context) : View(context) {
             return
         }
 
-        val lastHistorical =
-            candles.last()
+        val lastHistorical = candles.last()
 
         val lastHistoricalBucket =
             candleBucketTimestamp(
@@ -4242,16 +5072,60 @@ class TradingChartView(context: android.content.Context) : View(context) {
                 interval
             )
 
+        android.util.Log.d(
+            "ALTRIXA_P3_LIVE",
+            "LIVE_INPUT " +
+                "price=$price " +
+                "quoteTs=$quoteTimestamp " +
+                "bucketTs=$bucketTimestamp " +
+                "interval=$interval " +
+                "historicalLastTs=${lastHistorical.timestamp} " +
+                "historicalLastBucket=$lastHistoricalBucket " +
+                "existingLiveTs=${liveCandle?.timestamp ?: 0L} " +
+                "followLatest=$followLatest " +
+                "visibleCount=$visibleCount " +
+                "endIndex=$endIndex"
+        )
+
         /*
-         * If historical data already contains the current
-         * candle bucket, update that candle directly.
+         * P3 diagnostic: expose the live-candle routing decision in the
+         * existing header status so it can be verified directly on-device
+         * without ADB/logcat.
+         */
+        /*
+         * The current live bucket already exists.
          *
-         * This prevents duplicate historical/live candles.
+         * Keep updating the same candle rather than committing it to the
+         * historical list on every incoming WebSocket tick.
+         */
+        val existingLive = liveCandle
+
+        if (
+            existingLive != null &&
+            existingLive.timestamp == bucketTimestamp
+        ) {
+            liveCandle =
+                existingLive.copy(
+                    high = maxOf(existingLive.high, price),
+                    low = minOf(existingLive.low, price),
+                    close = price
+                )
+
+            if (followLatest) {
+                endIndex = candles.lastIndex
+            }
+
+            invalidate()
+            return
+        }
+
+        /*
+         * If historical data already contains the current bucket, update
+         * that authoritative candle directly.
          */
         if (lastHistoricalBucket == bucketTimestamp) {
 
-            val existingLive =
-                liveCandle
+            val existingLive = liveCandle
 
             val updated =
                 lastHistorical.copy(
@@ -4278,49 +5152,29 @@ class TradingChartView(context: android.content.Context) : View(context) {
         } else {
 
             /*
-             * A new timeframe bucket has started.
-             *
-             * First commit the previous standalone live candle
-             * to the historical series so it is never lost.
+             * A new timeframe bucket has started. Commit the previous
+             * live candle, then start the new candle from the first actual
+             * observed market price.
              */
             liveCandle?.let { completed ->
-
-                if (
-                    completed.timestamp >
-                    lastHistorical.timestamp
-                ) {
-                    candles =
-                        candles + completed
+                if (completed.timestamp > lastHistorical.timestamp) {
+                    candles = candles + completed
                 }
             }
-
-            /*
-             * Start the new live candle from the latest known
-             * close. The first live price becomes its initial
-             * high/low/close.
-             */
-            val openPrice =
-                candles.last().close
 
             liveCandle =
                 Candle(
                     timestamp = bucketTimestamp,
-                    open = openPrice,
-                    high = maxOf(openPrice, price),
-                    low = minOf(openPrice, price),
+                    open = price,
+                    high = price,
+                    low = price,
                     close = price,
                     volume = 0f
                 )
         }
 
-        /*
-         * Only the latest-following viewport should advance
-         * automatically. A manually scrolled chart stays where
-         * the user left it.
-         */
         if (followLatest) {
-            endIndex =
-                candles.lastIndex
+            endIndex = candles.lastIndex
         }
 
         invalidate()
@@ -4745,6 +5599,30 @@ class TradingChartView(context: android.content.Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+
+        // TEMP DIAG (P3P10): remove after viewport investigation.
+        run {
+            val dCount =
+                visibleCount.coerceIn(1, candles.size.coerceAtLeast(1))
+            val dStart =
+                (endIndex - dCount + 1).coerceAtLeast(0)
+            val dEnd =
+                (dStart + dCount - 1).coerceAtMost(candles.lastIndex)
+            android.util.Log.d(
+                "ALTRIXA_P3P10",
+                "DRAW_RANGE " +
+                    "candles.size=${candles.size} " +
+                    "startIndex=$dStart " +
+                    "endIndex=$endIndex " +
+                    "visibleCount=$visibleCount " +
+                    "followLatest=$followLatest " +
+                    "firstVisibleTs=${candles.getOrNull(dStart)?.timestamp ?: 0L} " +
+                    "lastVisibleTs=${candles.getOrNull(dEnd)?.timestamp ?: 0L} " +
+                    "lastCandleTs=${candles.lastOrNull()?.timestamp ?: 0L} " +
+                    "liveTs=${liveCandle?.timestamp ?: 0L}"
+            )
+        }
+
         canvas.drawColor(CHART_BG)
 
         if (candles.isEmpty()) {
