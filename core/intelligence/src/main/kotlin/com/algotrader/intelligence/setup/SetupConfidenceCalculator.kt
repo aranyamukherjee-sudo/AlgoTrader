@@ -1,5 +1,6 @@
 package com.algotrader.intelligence.setup
 
+import com.algotrader.intelligence.confidence.ConfidenceHistory
 import com.algotrader.intelligence.confidence.ConfidenceReading
 import com.algotrader.intelligence.evidence.EvidenceKind
 import com.algotrader.intelligence.evidence.EvidenceLedger
@@ -55,6 +56,41 @@ data class SetupConfidencePolicy(
  * This component does not perform as-of or lookahead checks; those belong to
  * [SetupEvidenceExtractor].
  */
+enum class SetupConfidenceCondition {
+    INSUFFICIENT,
+    SUPPORTING,
+    BALANCED,
+    CONTRADICTING
+}
+
+enum class SetupConfidenceChange {
+    INITIAL,
+    IMPROVED,
+    STABLE,
+    DEGRADED
+}
+
+/**
+ * Interpretation of one confidence reading against an optional prior history.
+ *
+ * This is descriptive only. It does not change setup lifecycle state, cancel an
+ * opportunity, expire a setup, or retire a strategy.
+ */
+data class SetupConfidenceAssessment(
+    val reading: ConfidenceReading?,
+    val condition: SetupConfidenceCondition,
+    val change: SetupConfidenceChange
+) {
+    val isDegraded: Boolean
+        get() = change == SetupConfidenceChange.DEGRADED
+
+    val isContradicting: Boolean
+        get() = condition == SetupConfidenceCondition.CONTRADICTING
+
+    val isActionable: Boolean
+        get() = reading != null
+}
+
 object SetupConfidenceCalculator {
 
     fun calculate(
@@ -91,6 +127,51 @@ object SetupConfidenceCalculator {
             value = confidence.coerceIn(0.0, 1.0),
             at = asOf,
             reason = "Setup evidence confidence"
+        )
+    }
+
+    /**
+     * Calculates confidence and classifies contradiction/degradation without
+     * introducing lifecycle transitions.
+     *
+     * [prior] is the existing chronological confidence history. When supplied,
+     * the new reading is compared with its current value only; the history
+     * itself is not mutated by this function.
+     */
+    fun assess(
+        evidence: EvidenceLedger,
+        asOf: Instant,
+        prior: ConfidenceHistory = ConfidenceHistory(),
+        policy: SetupConfidencePolicy = SetupConfidencePolicy()
+    ): SetupConfidenceAssessment {
+        val reading = calculate(evidence, asOf, policy)
+
+        if (reading == null) {
+            return SetupConfidenceAssessment(
+                reading = null,
+                condition = SetupConfidenceCondition.INSUFFICIENT,
+                change = SetupConfidenceChange.INITIAL
+            )
+        }
+
+        val condition = when {
+            reading.value > 0.5 -> SetupConfidenceCondition.SUPPORTING
+            reading.value < 0.5 -> SetupConfidenceCondition.CONTRADICTING
+            else -> SetupConfidenceCondition.BALANCED
+        }
+
+        val previous = prior.current
+        val change = when {
+            previous == null -> SetupConfidenceChange.INITIAL
+            reading.value > previous + 1e-9 -> SetupConfidenceChange.IMPROVED
+            reading.value < previous - 1e-9 -> SetupConfidenceChange.DEGRADED
+            else -> SetupConfidenceChange.STABLE
+        }
+
+        return SetupConfidenceAssessment(
+            reading = reading,
+            condition = condition,
+            change = change
         )
     }
 }
