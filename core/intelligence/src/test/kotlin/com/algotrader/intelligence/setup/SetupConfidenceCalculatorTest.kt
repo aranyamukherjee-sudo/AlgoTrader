@@ -345,6 +345,114 @@ class SetupConfidenceCalculatorTest {
     }
 
     @Test
+    fun `assessment treats confidence change within epsilon as stable`() {
+        val prior = ConfidenceHistory(
+            listOf(
+                ConfidenceReading(0.4999999995, T0, "previous")
+            )
+        )
+
+        val ledger = EvidenceLedger(
+            listOf(
+                evidence(
+                    "trend",
+                    EvidenceKind.TREND_ALIGNMENT,
+                    EvidencePolarity.SUPPORTING
+                ),
+                evidence(
+                    "pattern",
+                    EvidenceKind.CURRENT_PATTERN_MATCH,
+                    EvidencePolarity.CONTRADICTING
+                )
+            )
+        )
+
+        val stable = SetupConfidenceCalculator.assess(
+            evidence = ledger,
+            asOf = T0.plusSeconds(60),
+            prior = prior
+        )
+
+        assertEquals(0.5, stable.reading?.value)
+        assertEquals(
+            SetupConfidenceChange.STABLE,
+            stable.change
+        )
+    }
+
+    @Test
+    fun `assessment classifies confidence beyond epsilon as improved`() {
+        val prior = ConfidenceHistory(
+            listOf(
+                ConfidenceReading(0.499999998, T0, "previous")
+            )
+        )
+
+        val ledger = EvidenceLedger(
+            listOf(
+                evidence(
+                    "trend",
+                    EvidenceKind.TREND_ALIGNMENT,
+                    EvidencePolarity.SUPPORTING
+                ),
+                evidence(
+                    "pattern",
+                    EvidenceKind.CURRENT_PATTERN_MATCH,
+                    EvidencePolarity.CONTRADICTING
+                )
+            )
+        )
+
+        val assessment = SetupConfidenceCalculator.assess(
+            evidence = ledger,
+            asOf = T0.plusSeconds(60),
+            prior = prior
+        )
+
+        assertEquals(0.5, assessment.reading?.value)
+        assertEquals(
+            SetupConfidenceChange.IMPROVED,
+            assessment.change
+        )
+    }
+
+    @Test
+    fun `assessment classifies confidence beyond epsilon as degraded`() {
+        val prior = ConfidenceHistory(
+            listOf(
+                ConfidenceReading(0.500000002, T0, "previous")
+            )
+        )
+
+        val ledger = EvidenceLedger(
+            listOf(
+                evidence(
+                    "trend",
+                    EvidenceKind.TREND_ALIGNMENT,
+                    EvidencePolarity.SUPPORTING
+                ),
+                evidence(
+                    "pattern",
+                    EvidenceKind.CURRENT_PATTERN_MATCH,
+                    EvidencePolarity.CONTRADICTING
+                )
+            )
+        )
+
+        val assessment = SetupConfidenceCalculator.assess(
+            evidence = ledger,
+            asOf = T0.plusSeconds(60),
+            prior = prior
+        )
+
+        assertEquals(0.5, assessment.reading?.value)
+        assertEquals(
+            SetupConfidenceChange.DEGRADED,
+            assessment.change
+        )
+    }
+
+    @Test
     fun `assessment does not mutate prior history`() {
         val prior = ConfidenceHistory(
             listOf(

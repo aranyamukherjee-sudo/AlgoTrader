@@ -403,6 +403,93 @@ class SetupEvidenceExtractorTest {
     }
 
     @Test
+    fun `facts confirmed exactly at asOf are included`() {
+        val setup = setup(
+            patternConfirmedIndex = 3,
+            events = listOf(
+                BrokenEvent(3, at(3), 106.0),
+                RetestTouchedEvent(4, at(4), 105.2),
+                RetestHeldEvent(5, at(5), 106.1)
+            )
+        )
+        val strategy = TestFixtures.priceActionDna().ref
+
+        val ledger = SetupEvidenceExtractor.extract(
+            setup = setup,
+            strategy = strategy,
+            asOfIndex = 5,
+            asOf = at(5)
+        )
+
+        assertEquals(
+            1,
+            ledger.ofKind(EvidenceKind.CURRENT_PATTERN_MATCH).size
+        )
+        assertEquals(
+            1,
+            ledger.ofKind(
+                EvidenceKind.BREAKOUT_RETEST_CONFIRMATION
+            ).size
+        )
+    }
+
+    @Test
+    fun `future retest confirmation is excluded at immediately preceding index`() {
+        val setup = setup(
+            events = listOf(
+                BrokenEvent(3, at(3), 106.0),
+                RetestTouchedEvent(4, at(4), 105.2),
+                RetestHeldEvent(5, at(5), 106.1)
+            )
+        )
+        val strategy = TestFixtures.priceActionDna().ref
+
+        val ledger = SetupEvidenceExtractor.extract(
+            setup = setup,
+            strategy = strategy,
+            asOfIndex = 4,
+            asOf = at(4)
+        )
+
+        assertTrue(
+            ledger.ofKind(
+                EvidenceKind.BREAKOUT_RETEST_CONFIRMATION
+            ).isEmpty()
+        )
+    }
+
+    @Test
+    fun `ledger ordering is deterministic for identical valid setup inputs`() {
+        val setup = setup(
+            events = listOf(
+                BrokenEvent(3, at(3), 106.0),
+                RetestTouchedEvent(4, at(4), 105.2),
+                RetestHeldEvent(5, at(5), 106.1)
+            )
+        )
+        val strategy = TestFixtures.priceActionDna().ref
+
+        val first = SetupEvidenceExtractor.extract(
+            setup = setup,
+            strategy = strategy,
+            asOfIndex = 5,
+            asOf = at(5)
+        )
+        val second = SetupEvidenceExtractor.extract(
+            setup = setup,
+            strategy = strategy,
+            asOfIndex = 5,
+            asOf = at(5)
+        )
+
+        assertEquals(first.items, second.items)
+        assertEquals(
+            first.items.map { it.id },
+            first.items.sortedBy { it.id.id }.map { it.id }
+        )
+    }
+
+    @Test
     fun `same inputs produce identical ledger`() {
         val setup = setup()
         val strategy = TestFixtures.priceActionDna().ref
