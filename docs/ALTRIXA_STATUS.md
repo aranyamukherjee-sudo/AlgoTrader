@@ -3,7 +3,7 @@
 **Last updated:** 2026-10-07  
 **Repository:** `aranyamukherjee-sudo/AlgoTrader`  
 **Branch:** `main`  
-**Baseline commit:** `2dd963a` — `ASI-3 add Android device verification harnesses`
+**Baseline commit:** `b492efd` — `docs: complete ASI-3.4 verification checkpoint`
 
 ---
 
@@ -63,7 +63,7 @@
 |---|---|---|
 | ASI-1 | Intelligence Foundation | ✅ COMPLETE |
 | ASI-2 | Automatic Strategy Discovery | ✅ COMPLETE |
-| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE |
+| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5 NEXT |
 | ASI-4 | Opportunity Detection | ⏳ FUTURE |
 | ASI-5 | Entry Intelligence | ⏳ FUTURE |
 | ASI-6 | Exit Intelligence | ⏳ FUTURE |
@@ -174,22 +174,94 @@ ASI-3.2 is complete. Do not reopen unless regression is found.
 
 ## ASI-3.3 — Breakout / Setup-Signal Intelligence
 
-**Status: 🔵 NEXT TARGET**
+**Status: ✅ COMPLETE**
 
-This is the immediate next ASI implementation target.
+Implemented and verified as the foundation for deterministic breakout/setup
+intelligence.
 
-Scope:
+Completed:
 - breakout detection
 - breakout qualification
-- retest detection
+- retest lifecycle
 - continuation setups
-- failed-breakout detection
-- setup/signal qualification
-- deterministic signal output
-- unit/domain tests
-- Android/device verification harness where appropriate
+- failed-breakout handling
+- deterministic setup/signal output
+- domain/unit tests
+- no-lookahead and lifecycle validation
 
-ASI-3.3 has **not yet been implemented**.
+ASI-3.3 is complete. Do not reopen unless a regression is identified.
+
+---
+
+## ASI-3.4 — Setup Evidence & Confidence Intelligence
+
+**Status: ✅ COMPLETE**
+
+ASI-3.4 extends the existing ASI-3.3 setup architecture without duplicating
+the existing evidence, confidence, opportunity, or lifecycle models.
+
+### Completed stages
+
+| Stage | Description | Status |
+|---|---|---|
+| ASI-3.4.1 | Setup evidence contract | ✅ COMPLETE |
+| ASI-3.4.2 | Deterministic live-evidence extraction | ✅ COMPLETE |
+| ASI-3.4.3 | Evidence → confidence calculation | ✅ COMPLETE |
+| ASI-3.4.4 | Contradiction / degradation handling | ✅ COMPLETE |
+| ASI-3.4.5 | Determinism, boundary & no-lookahead coverage | ✅ COMPLETE |
+| ASI-3.4.6 | Setup assessment engine composition | ✅ COMPLETE |
+| ASI-3.4.7 | Physical Android device verification | ✅ COMPLETE |
+| ASI-3.4.8 | Documentation & GitHub checkpoint | ✅ COMPLETE |
+
+### Verification
+
+- Final focused ASI-3.4.5 verification: 32 tests, zero failures.
+- Full `:core:intelligence:test`: passed.
+- ASI-3.4.6 focused engine tests: 6 tests, zero failures.
+- Physical Android verification: **ALL CHECKS = true**.
+- Temporary Android verification harness removed after successful testing.
+- Final Android compilation after cleanup: `BUILD SUCCESSFUL`.
+- Checkpoint commit: `b492efd`.
+
+ASI-3.4 is complete. Do not reopen unless a regression is identified.
+
+---
+
+## ASI-3.5 — Setup Context & Confluence Intelligence
+
+**Status: 🔵 NEXT TARGET**
+
+ASI-3.5 will build on the completed ASI-3.3 setup model and ASI-3.4
+evidence/confidence assessment.
+
+### Planned scope
+
+- deterministic setup context extraction
+- market-structure context
+- relevant support/resistance context
+- pattern context
+- breakout direction and lifecycle context
+- confluence assessment across independent setup factors
+- supporting versus conflicting context
+- deterministic factor ordering
+- prevention of double-counting the same underlying context
+- deterministic setup-quality classification
+- no-lookahead and prefix-consistency guarantees
+- focused JVM/domain tests
+
+### Architecture boundary
+
+ASI-3.5 remains inside `:core:intelligence`.
+
+It will not introduce:
+- Android UI integration
+- order execution
+- broker/FYERS coupling
+- live trading behavior
+- automatic entry decisions
+
+ASI-3.5 is a context/confluence intelligence layer, not an execution or
+trade-placement engine.
 
 ---
 
@@ -280,8 +352,8 @@ When future work changes project state:
 
 **Current project position:**
 
-`Phase 3 → ASI-3 → ASI-3.3 Breakout / Setup-Signal Intelligence`
+`Phase 3 → ASI-3 → ASI-3.5 Setup Context & Confluence Intelligence`
 
 **Current Git baseline:**
 
-`2dd963a`
+`b492efd`
