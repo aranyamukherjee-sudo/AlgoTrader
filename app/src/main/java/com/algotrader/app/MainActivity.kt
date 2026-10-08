@@ -1330,6 +1330,23 @@ private var isHomeScreenActive = false
     }
 
 
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+
+        requestPermissions(
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            4202
+        )
+    }
+
     private fun showFyersAuthNotification() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -2682,6 +2699,7 @@ private var isHomeScreenActive = false
         super.onCreate(savedInstanceState)
 
         buildApp()
+        requestNotificationPermissionIfNeeded()
         connectQuotesWebSocket()
         discoverNiftyFuturesContract()
 
