@@ -1,6 +1,6 @@
 # ALTRIXA / AlgoTrader — Master Progress & Status Report
 
-**Last updated:** 2026-10-09
+**Last updated:** 2026-10-10
 **Repository:** `aranyamukherjee-sudo/AlgoTrader`  
 **Branch:** `main`  
 **Documentation checkpoint:** `150b0c3` — `docs: update ASI-3.6 project status`
@@ -65,7 +65,7 @@
 | ASI-1 | Intelligence Foundation | ✅ COMPLETE |
 | ASI-2 | Automatic Strategy Discovery | ✅ COMPLETE |
 | ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5, ASI-3.6 VERIFIED; ASI-3.7 INTEGRATION TEST PASSED |
-| ASI-4 | Opportunity Detection | ⏳ FUTURE |
+| ASI-4 | Opportunity Detection | 🟡 ACTIVE — ASI-4.1 IMPLEMENTED; CI/DEVICE VERIFICATION PENDING |
 | ASI-5 | Entry Intelligence | ⏳ FUTURE |
 | ASI-6 | Exit Intelligence | ⏳ FUTURE |
 | ASI-7 | Confidence & Evidence Engine | ⏳ FUTURE |
@@ -296,6 +296,44 @@ The next ASI sub-milestone has not yet been selected. Reconcile the existing
 ASI roadmap/backlog before naming or implementing the next milestone.
 
 
+## ASI-4.1 — Opportunity Registry & Deduplication
+
+**Status: 🟡 IMPLEMENTED — GITHUB CI AND DEVICE VERIFICATION PENDING**
+
+Source checkpoint:
+- Commit: `179f3e10a04fbcc3659bb215c19b95ee766f4d7e`
+- Message: `ASI-4.1 add opportunity registry and deduplication`
+
+Implementation:
+- Added `OpportunityRegistry.kt` in `core/intelligence`.
+- Registers fully evaluated setup-opportunity candidates through the existing
+  `SetupOpportunityComposer`.
+- Deduplicates repeated occurrences while distinguishing strategy versions,
+  instruments, timeframes, and separate breakout occurrences.
+- Rejects stale evaluations within the corresponding strategy/instrument/
+  timeframe stream.
+- Does not replace the existing opportunity lifecycle state machine.
+- Does not add order execution, broker integration, notifications, or automatic
+  entry decisions.
+- Registry is in-memory; persistent storage and production orchestration are
+  not established by this milestone.
+
+Verification recorded:
+- Focused opportunity, composer, confidence, evidence, and setup-context tests:
+  `BUILD SUCCESSFUL`.
+- Registry compilation: passed.
+- Local Android debug APK build: `BUILD SUCCESSFUL`.
+- Local APK SHA-256:
+  `130ef4c4104d70b8a52f4817b06d17fa93f415f958d8108a788179f4ee63c109`.
+- GitHub Actions Android Release run #115 was started for this exact commit.
+- CI artifact verification and physical-device installation/launch verification
+  remain pending; do not mark ASI-4.1 device-verified until completed.
+
+ASI-4.1 is a registry/deduplication foundation, not completion of all ASI-4
+opportunity-detection capabilities.
+
+---
+
 ## ASI-3.7 — Pipeline Integration Coverage
 
 **Status: ✅ INTEGRATION TEST PASSED — GITHUB CHECKPOINT PENDING**
@@ -328,7 +366,7 @@ them. Review the existing backlog before selecting the next ASI milestone.
 
 **GitHub `main`:**
 
-`2dd963a ASI-3 add Android device verification harnesses`
+`179f3e1 ASI-4.1 add opportunity registry and deduplication`
 
 Fresh GitHub clone was previously verified and built successfully.
 
@@ -381,14 +419,18 @@ Normal Android APK installation through the device/Downloads workflow remains th
 
 ## Immediate target
 
-**ASI-3.7 checkpoint publication, then ASI roadmap reconciliation.**
+**Complete ASI-4.1 GitHub-based verification, then stop at ASI-4.1.**
 
-1. Publish and verify the ASI-3.7 test and status checkpoint on GitHub.
-2. Confirm the next ASI milestone from existing project planning before
-   naming or implementing it.
-3. Preserve P3P11–P3P19 as planned backlog items until individually
+1. Confirm GitHub Actions run #115 succeeds for commit `179f3e1`.
+2. Download the APK artifact from that exact workflow run and verify its
+   provenance and SHA-256.
+3. Install the CI artifact on the Android device and verify that the app
+   launches successfully.
+4. Record the actual CI artifact hash and device outcome; do not infer device
+   verification from a successful build alone.
+5. Do not begin ASI-4.2 as part of this checkpoint.
+6. Preserve P3P11–P3P19 as planned backlog items until individually
    implemented and verified.
-4. Retain release-artifact hashes and source provenance for reproducibility.
 
 ---
 
@@ -405,9 +447,9 @@ When future work changes project state:
 
 **Current project position:**
 
-`Phase 3 → ASI-3 → ASI-3.7 integration test passed locally; GitHub checkpoint
-pending. Next ASI milestone requires backlog confirmation.`
+`Phase 3 → ASI-4 → ASI-4.1 registry implemented and locally tested;
+GitHub CI artifact and device verification pending.`
 
 **Current documentation Git checkpoint:**
 
-`150b0c3` — documentation-only commit; the ASI-3.5 source checkpoint remains separately identified above.
+`179f3e1` — ASI-4.1 source checkpoint; this roadmap update is a separate documentation checkpoint.
