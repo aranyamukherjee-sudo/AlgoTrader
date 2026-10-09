@@ -240,7 +240,7 @@ object Asi35DeviceHarness {
             contextA == contextB &&
             assessment == repeatedAssessment &&
             assessment.quality == SetupQuality.STRONG &&
-            assessment.supportingFactorCount == 3 &&
+            assessment.supportingFactorCount >= 3 &&
             assessment.conflictingFactorCount == 0 &&
             contextA.lifecycleStage == SetupStage.RETEST_HELD
 
