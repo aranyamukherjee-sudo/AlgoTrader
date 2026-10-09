@@ -1,9 +1,9 @@
 # ALTRIXA / AlgoTrader — Master Progress & Status Report
 
-**Last updated:** 2026-10-07  
+**Last updated:** 2026-10-09
 **Repository:** `aranyamukherjee-sudo/AlgoTrader`  
 **Branch:** `main`  
-**Baseline commit:** `b492efd` — `docs: complete ASI-3.4 verification checkpoint`
+**Baseline commit:** `419e467` — `ASI-3.5 align device confluence assertion`
 
 ---
 
@@ -63,7 +63,7 @@
 |---|---|---|
 | ASI-1 | Intelligence Foundation | ✅ COMPLETE |
 | ASI-2 | Automatic Strategy Discovery | ✅ COMPLETE |
-| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5 NEXT |
+| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5 DEVICE-VERIFIED; ASI-3.6 INTELLIGENCE TESTS PASS; DEVICE/RELEASE VERIFICATION PENDING |
 | ASI-4 | Opportunity Detection | ⏳ FUTURE |
 | ASI-5 | Entry Intelligence | ⏳ FUTURE |
 | ASI-6 | Exit Intelligence | ⏳ FUTURE |
@@ -229,10 +229,13 @@ ASI-3.4 is complete. Do not reopen unless a regression is identified.
 
 ## ASI-3.5 — Setup Context & Confluence Intelligence
 
-**Status: 🔵 NEXT TARGET**
+**Status: ✅ COMPLETE — DEVICE CHECKS REPORTED PASSING**
 
-ASI-3.5 will build on the completed ASI-3.3 setup model and ASI-3.4
-evidence/confidence assessment.
+ASI-3.5 builds on the completed ASI-3.3 setup model and ASI-3.4
+evidence/confidence assessment. The reported device verification passed:
+strong confluence, supporting-level detection, conflict detection and
+quality checks, future-evidence exclusion, full-series lookahead
+rejection, deterministic repeat behavior, and lifecycle-stage checks.
 
 ### Planned scope
 
@@ -262,6 +265,32 @@ It will not introduce:
 
 ASI-3.5 is a context/confluence intelligence layer, not an execution or
 trade-placement engine.
+
+ASI-3.5 is complete based on the reported device verification. Its final
+source checkpoint is `419e467`; the separate release artifact from that
+checkpoint has not yet been confirmed.
+
+---
+
+## ASI-3.6 — Opportunity Composer
+
+**Status: ✅ INTELLIGENCE TEST SUITE PASSED; RELEASE ARTIFACT PENDING**
+
+Implementation references include `SetupOpportunityComposer.kt` in
+`core/intelligence` and `Asi36DeviceHarness.kt` in the Android app.
+
+Recorded verification:
+- `:core:intelligence:test` completed with `BUILD SUCCESSFUL`.
+- The recorded intelligence test compilation/build also completed
+  successfully.
+- An attempted local release build failed at `:app:packageRelease`
+  because release signing configuration was missing `storeFile`.
+- Do not mark the release APK or ASI-3.6 Android device verification as
+  confirmed until a successful artifact and device result are recorded.
+
+The current repository search did not identify an established next ASI
+sub-milestone after ASI-3.6. Confirm the existing project backlog before
+creating or naming a subsequent milestone.
 
 ---
 
@@ -322,20 +351,17 @@ Normal Android APK installation through the device/Downloads workflow remains th
 
 ## Immediate target
 
-**ASI-3.3 — Breakout / Setup-Signal Intelligence**
+**Verification and roadmap reconciliation after ASI-3.6.**
 
-Recommended sequence:
-
-1. Inspect current ASI-3.1 / ASI-3.2 source baseline.
-2. Define deterministic breakout/setup domain model.
-3. Implement detection rules.
-4. Add focused unit tests.
-5. Add deterministic repeat verification.
-6. Add Android verification harness.
-7. Build from clean GitHub-compatible source.
-8. Verify on device.
-9. Commit with a clear ASI-3.3 commit message.
-10. Update this status document with the verified result.
+1. Confirm the exact current `main` source checkpoint.
+2. Review the ASI-3.6 device-harness result and record it only when
+   actual device output is available.
+3. Produce a correctly signed release artifact from the intended
+   GitHub source checkpoint and verify its provenance/hash.
+4. Confirm the next ASI milestone from existing project planning before
+   naming or implementing it.
+5. Preserve P3P11–P3P19 as planned backlog items until individually
+   implemented and verified.
 
 ---
 
@@ -352,8 +378,9 @@ When future work changes project state:
 
 **Current project position:**
 
-`Phase 3 → ASI-3 → ASI-3.5 Setup Context & Confluence Intelligence`
+`Phase 3 → ASI-3 → ASI-3.6 Opportunity Composer; next ASI milestone
+requires backlog confirmation.`
 
 **Current Git baseline:**
 
-`b492efd`
+`419e467`
