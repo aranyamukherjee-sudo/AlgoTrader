@@ -208,8 +208,8 @@ object Asi35DeviceHarness {
             zones = listOf(
                 PriceZone(
                     kind = ZoneKind.SUPPORT,
-                    low = 99.0,
-                    high = 99.5,
+                    low = 99.7,
+                    high = 99.8,
                     touches = 2,
                     firstIndex = 2,
                     lastIndex = 3,
