@@ -63,6 +63,9 @@ object PatternDetector {
      * Two CONSECUTIVE same-type pivots with at least one opposite pivot between them; the neckline is the most
      * extreme opposite pivot between (earliest on a tie).
      */
+    private fun strictlyChronological(members: List<SwingPivot>): Boolean =
+        members.zipWithNext().all { (a, b) -> a.index < b.index }
+
     private fun doublesAndMW(p: List<SwingPivot>, c: PatternConfig): List<DetectedPattern> {
         val out = ArrayList<DetectedPattern>()
         for (type in PivotType.values()) {
@@ -79,6 +82,7 @@ object PatternDetector {
                     val depth = minOf(first.price, second.price) - neck.price
                     if (!deepEnough(depth, neck.price, c)) continue
                     val members = listOf(first, neck, second)
+                    if (!strictlyChronological(members)) continue
                     if (same(first.price, second.price, c)) {
                         out += build(PatternType.DOUBLE_TOP, members, neck.price)
                     } else if (second.price < first.price &&
@@ -91,6 +95,7 @@ object PatternDetector {
                     val depth = neck.price - maxOf(first.price, second.price)
                     if (!deepEnough(depth, neck.price, c)) continue
                     val members = listOf(first, neck, second)
+                    if (!strictlyChronological(members)) continue
                     if (same(first.price, second.price, c)) {
                         out += build(PatternType.DOUBLE_BOTTOM, members, neck.price)
                     } else if (second.price > first.price &&
@@ -109,6 +114,7 @@ object PatternDetector {
         val out = ArrayList<DetectedPattern>()
         for (i in 0..p.size - 4) {
             val w = p.subList(i, i + 4)
+            if (!strictlyChronological(w)) continue
             if ((0 until 3).any { w[it].type == w[it + 1].type }) continue
             rangeShape(w, c)?.let { out += build(it, w) }
             flagShape(w, c)?.let { out += build(it, w) }

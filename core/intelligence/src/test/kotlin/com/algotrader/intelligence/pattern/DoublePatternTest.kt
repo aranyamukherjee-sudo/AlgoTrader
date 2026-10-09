@@ -18,6 +18,26 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class DoublePatternTest {
+    @Test
+    fun `double top rejects selected pivots sharing a candle index`() {
+        val raw = listOf(
+            pivot(PivotType.HIGH, 1, 120.0),
+            pivot(PivotType.LOW, 1, 90.0),
+            pivot(PivotType.HIGH, 3, 120.0)
+        )
+        val structure = StructureAnalysis(
+            status = AnalysisStatus.OK,
+            message = "",
+            candleCount = 5,
+            pivots = raw.map { ClassifiedPivot(it, StructureLabel.FIRST) },
+            state = MarketStructureState.RANGE,
+            zones = emptyList(),
+            atr = null
+        )
+
+        assertTrue(PatternDetector.detect(structure, cfg).patterns.isEmpty())
+    }
+
 
     @Test
     fun `double top - exact members, envelope, neckline and confirmation`() {
