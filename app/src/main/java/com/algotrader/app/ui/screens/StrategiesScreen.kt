@@ -7,6 +7,7 @@ import com.algotrader.app.theme.dpToPx
 import com.algotrader.app.asi2.Asi2DeviceHarness
 import com.algotrader.app.asi3.Asi3DeviceHarness
 import com.algotrader.app.asi3.Asi33DeviceHarness
+import com.algotrader.app.asi3.Asi34DeviceHarness
 import com.algotrader.app.asi3.Asi36DeviceHarness
 import com.algotrader.app.ui.components.AltrixaTone
 import com.algotrader.app.ui.components.altrixaCard
@@ -304,6 +305,67 @@ object StrategiesScreen {
         )
 
         container.addView(asi33Card, topGap)
+
+
+        val asi34Card = altrixaCard(context)
+        asi34Card.addView(
+            altrixaLabel(
+                context,
+                "Verify strategy lifecycle transitions, evidence gates, terminal retirement and rejection immutability."
+            )
+        )
+
+        val asi34Button = android.widget.Button(context).apply {
+            text = "Run ASI-3.4 Lifecycle Test"
+            setOnClickListener {
+                try {
+                    val result = Asi34DeviceHarness.run()
+                    val details = buildString {
+                        appendLine("Lifecycle path:")
+                        appendLine(result.lifecyclePath)
+                        appendLine()
+                        appendLine("History entries: ${result.historyCount}")
+                        appendLine("Missing evidence rejected: ${result.missingEvidenceRejected}")
+                        appendLine("Illegal jump rejected: ${result.illegalJumpRejected}")
+                        appendLine("Retirement terminal: ${result.retirementTerminal}")
+                        appendLine("Index-only monitoring rejected: ${result.indexOnlyRejected}")
+                        appendLine("Rejected change preserved original: ${result.rejectedChangePreservedOriginal}")
+                        appendLine("Deterministic repeat: ${result.deterministic}")
+                        appendLine()
+                        appendLine(result.message)
+                    }
+                    AlertDialog.Builder(context)
+                        .setTitle(
+                            if (result.passed) {
+                                "ASI-3.4 Lifecycle Test PASSED"
+                            } else {
+                                "ASI-3.4 Lifecycle Test FAILED"
+                            }
+                        )
+                        .setMessage(details)
+                        .setPositiveButton("OK", null)
+                        .show()
+                } catch (t: Throwable) {
+                    AlertDialog.Builder(context)
+                        .setTitle("ASI-3.4 Lifecycle Test FAILED")
+                        .setMessage("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+        }
+
+        asi34Card.addView(
+            asi34Button,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = context.dpToPx(8)
+            }
+        )
+
+        container.addView(asi34Card, topGap)
 
         val asi36Card = altrixaCard(context)
         asi36Card.addView(
