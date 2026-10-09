@@ -64,7 +64,7 @@
 |---|---|---|
 | ASI-1 | Intelligence Foundation | ✅ COMPLETE |
 | ASI-2 | Automatic Strategy Discovery | ✅ COMPLETE |
-| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5 AND ASI-3.6 VERIFIED |
+| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5, ASI-3.6 VERIFIED; ASI-3.7 INTEGRATION TEST PASSED |
 | ASI-4 | Opportunity Detection | ⏳ FUTURE |
 | ASI-5 | Entry Intelligence | ⏳ FUTURE |
 | ASI-6 | Exit Intelligence | ⏳ FUTURE |
@@ -295,6 +295,33 @@ Recorded verification:
 The next ASI sub-milestone has not yet been selected. Reconcile the existing
 ASI roadmap/backlog before naming or implementing the next milestone.
 
+
+## ASI-3.7 — Pipeline Integration Coverage
+
+**Status: ✅ INTEGRATION TEST PASSED — GITHUB CHECKPOINT PENDING**
+
+Added `Asi3PipelineIntegrationTest.kt` under
+`core/intelligence/src/test/kotlin/com/algotrader/intelligence/opportunity/`.
+
+Recorded fresh local verification:
+- Command: `./gradlew :core:intelligence:test --rerun-tasks`
+- Gradle result: `BUILD SUCCESSFUL`; 8 actionable tasks executed.
+- Integration test: `candleDerivedPipelineComposesDeterministicallyAndRejectsLookahead()`.
+- Test report: 1 test, 0 failures, 0 errors, 0 skipped.
+- Exercises candle-derived structure, patterns, breakout qualification,
+  setup context, confluence, and opportunity composition.
+- Checks deterministic repeated outputs and expected `OPPORTUNITY_FOUND` state.
+- Checks that a historical prefix has later candles beyond breakout confirmation
+  and rejects analyses whose candle counts do not match the prefix context.
+
+This is a JVM integration-test result. It does not by itself establish
+physical Android-device verification or a release APK verification.
+
+ASI-3.8 and ASI-3.9 remain unconfirmed roadmap items; do not invent scope for
+them. Review the existing backlog before selecting the next ASI milestone.
+
+---
+
 ---
 
 # 7. Current Engineering Baseline
@@ -354,13 +381,14 @@ Normal Android APK installation through the device/Downloads workflow remains th
 
 ## Immediate target
 
-**Roadmap reconciliation after ASI-3.6 verification.**
+**ASI-3.7 checkpoint publication, then ASI roadmap reconciliation.**
 
-1. Confirm the next ASI milestone from existing project planning before
+1. Publish and verify the ASI-3.7 test and status checkpoint on GitHub.
+2. Confirm the next ASI milestone from existing project planning before
    naming or implementing it.
-2. Preserve P3P11–P3P19 as planned backlog items until individually
+3. Preserve P3P11–P3P19 as planned backlog items until individually
    implemented and verified.
-3. Retain release-artifact hashes and source provenance for reproducibility.
+4. Retain release-artifact hashes and source provenance for reproducibility.
 
 ---
 
@@ -377,8 +405,8 @@ When future work changes project state:
 
 **Current project position:**
 
-`Phase 3 → ASI-3 → ASI-3.6 Opportunity Composer verified; next ASI milestone
-requires backlog confirmation.`
+`Phase 3 → ASI-3 → ASI-3.7 integration test passed locally; GitHub checkpoint
+pending. Next ASI milestone requires backlog confirmation.`
 
 **Current documentation Git checkpoint:**
 
