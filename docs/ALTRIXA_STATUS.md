@@ -3,7 +3,8 @@
 **Last updated:** 2026-10-09
 **Repository:** `aranyamukherjee-sudo/AlgoTrader`  
 **Branch:** `main`  
-**Baseline commit:** `419e467` — `ASI-3.5 align device confluence assertion`
+**Documentation checkpoint:** `150b0c3` — `docs: update ASI-3.6 project status`
+**ASI-3.5 source checkpoint:** `419e467` — `ASI-3.5 align device confluence assertion`
 
 ---
 
@@ -63,7 +64,7 @@
 |---|---|---|
 | ASI-1 | Intelligence Foundation | ✅ COMPLETE |
 | ASI-2 | Automatic Strategy Discovery | ✅ COMPLETE |
-| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5 DEVICE-VERIFIED; ASI-3.6 INTELLIGENCE TESTS PASS; DEVICE/RELEASE VERIFICATION PENDING |
+| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5 AND ASI-3.6 VERIFIED |
 | ASI-4 | Opportunity Detection | ⏳ FUTURE |
 | ASI-5 | Entry Intelligence | ⏳ FUTURE |
 | ASI-6 | Exit Intelligence | ⏳ FUTURE |
@@ -274,7 +275,7 @@ checkpoint has not yet been confirmed.
 
 ## ASI-3.6 — Opportunity Composer
 
-**Status: ✅ INTELLIGENCE TEST SUITE PASSED; RELEASE ARTIFACT PENDING**
+**Status: ✅ COMPLETE — INTELLIGENCE TESTS, RELEASE ARTIFACT, AND DEVICE VERIFICATION PASSED**
 
 Implementation references include `SetupOpportunityComposer.kt` in
 `core/intelligence` and `Asi36DeviceHarness.kt` in the Android app.
@@ -283,14 +284,16 @@ Recorded verification:
 - `:core:intelligence:test` completed with `BUILD SUCCESSFUL`.
 - The recorded intelligence test compilation/build also completed
   successfully.
-- An attempted local release build failed at `:app:packageRelease`
-  because release signing configuration was missing `storeFile`.
-- Do not mark the release APK or ASI-3.6 Android device verification as
-  confirmed until a successful artifact and device result are recorded.
+- The user confirmed that ASI-3.6 release-artifact verification and the
+  physical-device harness both passed.
+- Reported release APK SHA-256:
+  `db57502a2b18567517df2022dcd8276a25452bcd88c787f221655dfcf66adfec`.
+- Reported signer certificate SHA-256:
+  `265822b3b8a4744f3006ab74d5f4677bb0c047ead24ab0304a240e3534147119`.
+- Keep the artifact hashes and source checkpoint together for reproducibility.
 
-The current repository search did not identify an established next ASI
-sub-milestone after ASI-3.6. Confirm the existing project backlog before
-creating or naming a subsequent milestone.
+The next ASI sub-milestone has not yet been selected. Reconcile the existing
+ASI roadmap/backlog before naming or implementing the next milestone.
 
 ---
 
@@ -351,17 +354,13 @@ Normal Android APK installation through the device/Downloads workflow remains th
 
 ## Immediate target
 
-**Verification and roadmap reconciliation after ASI-3.6.**
+**Roadmap reconciliation after ASI-3.6 verification.**
 
-1. Confirm the exact current `main` source checkpoint.
-2. Review the ASI-3.6 device-harness result and record it only when
-   actual device output is available.
-3. Produce a correctly signed release artifact from the intended
-   GitHub source checkpoint and verify its provenance/hash.
-4. Confirm the next ASI milestone from existing project planning before
+1. Confirm the next ASI milestone from existing project planning before
    naming or implementing it.
-5. Preserve P3P11–P3P19 as planned backlog items until individually
+2. Preserve P3P11–P3P19 as planned backlog items until individually
    implemented and verified.
+3. Retain release-artifact hashes and source provenance for reproducibility.
 
 ---
 
@@ -378,9 +377,9 @@ When future work changes project state:
 
 **Current project position:**
 
-`Phase 3 → ASI-3 → ASI-3.6 Opportunity Composer; next ASI milestone
+`Phase 3 → ASI-3 → ASI-3.6 Opportunity Composer verified; next ASI milestone
 requires backlog confirmation.`
 
-**Current Git baseline:**
+**Current documentation Git checkpoint:**
 
-`419e467`
+`150b0c3` — documentation-only commit; the ASI-3.5 source checkpoint remains separately identified above.
