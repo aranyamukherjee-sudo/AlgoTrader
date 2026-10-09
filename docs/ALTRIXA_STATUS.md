@@ -65,7 +65,7 @@
 | ASI-1 | Intelligence Foundation | ✅ COMPLETE |
 | ASI-2 | Automatic Strategy Discovery | ✅ COMPLETE |
 | ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5, ASI-3.6 VERIFIED; ASI-3.7 INTEGRATION TEST PASSED |
-| ASI-4 | Opportunity Detection | 🟡 ACTIVE — ASI-4.1 IMPLEMENTED; CI/DEVICE VERIFICATION PENDING |
+| ASI-4 | Opportunity Detection | 🟡 ACTIVE — ASI-4.1 VERIFIED; FUTURE ASI-4 WORK NOT STARTED |
 | ASI-5 | Entry Intelligence | ⏳ FUTURE |
 | ASI-6 | Exit Intelligence | ⏳ FUTURE |
 | ASI-7 | Confidence & Evidence Engine | ⏳ FUTURE |
@@ -298,7 +298,7 @@ ASI roadmap/backlog before naming or implementing the next milestone.
 
 ## ASI-4.1 — Opportunity Registry & Deduplication
 
-**Status: 🟡 IMPLEMENTED — GITHUB CI AND DEVICE VERIFICATION PENDING**
+**Status: ✅ VERIFIED — FOCUSED TESTS, GITHUB RELEASE BUILD, INSTALLATION, LAUNCH AND PLAY PROTECT PASSED**
 
 Source checkpoint:
 - Commit: `179f3e10a04fbcc3659bb215c19b95ee766f4d7e`
@@ -325,9 +325,19 @@ Verification recorded:
 - Local Android debug APK build: `BUILD SUCCESSFUL`.
 - Local APK SHA-256:
   `130ef4c4104d70b8a52f4817b06d17fa93f415f958d8108a788179f4ee63c109`.
-- GitHub Actions Android Release run #115 was started for this exact commit.
-- CI artifact verification and physical-device installation/launch verification
-  remain pending; do not mark ASI-4.1 device-verified until completed.
+- GitHub Actions Android Release run #115 completed successfully for source
+  commit `179f3e10a04fbcc3659bb215c19b95ee766f4d7e`.
+- Signed APK build and artifact upload: passed.
+- Artifact: `AlgoTrader-release`, ZIP size 4,256,899 bytes.
+- Artifact ZIP SHA-256:
+  `0c8905d200cd22e8eae4fc781533e6457631d44754114744d0f46f8745cc8a38`.
+- User-confirmed installation of the GitHub Actions APK: passed.
+- Physical-device app launch: passed.
+- Google Play Protect: allowed installation.
+- Installed APK SHA-256:
+  `e56c22052f98a267dfc14cd030a12d0def23bb488eed28031705093e477e5b93`.
+- The installed APK hash is recorded as reported from the device's Downloads
+  directory; it is distinct from the artifact ZIP digest.
 
 ASI-4.1 is a registry/deduplication foundation, not completion of all ASI-4
 opportunity-detection capabilities.
@@ -366,7 +376,7 @@ them. Review the existing backlog before selecting the next ASI milestone.
 
 **GitHub `main`:**
 
-`179f3e1 ASI-4.1 add opportunity registry and deduplication`
+`9b5c3ec docs: update roadmap for ASI-4.1`
 
 Fresh GitHub clone was previously verified and built successfully.
 
@@ -419,15 +429,14 @@ Normal Android APK installation through the device/Downloads workflow remains th
 
 ## Immediate target
 
-**Complete ASI-4.1 GitHub-based verification, then stop at ASI-4.1.**
+**ASI-4.1 verification complete. Stop here; ASI-4.2 is not started.**
 
-1. Confirm GitHub Actions run #115 succeeds for commit `179f3e1`.
-2. Download the APK artifact from that exact workflow run and verify its
-   provenance and SHA-256.
-3. Install the CI artifact on the Android device and verify that the app
-   launches successfully.
-4. Record the actual CI artifact hash and device outcome; do not infer device
-   verification from a successful build alone.
+1. ASI-4.1 focused tests and local build passed.
+2. GitHub Actions Android Release run #115 succeeded for source commit
+   `179f3e10a04fbcc3659bb215c19b95ee766f4d7e`.
+3. The user confirmed installing the GitHub Actions APK, successful launch,
+   and Play Protect allowing installation.
+4. CI artifact ZIP digest and installed APK SHA-256 are recorded above.
 5. Do not begin ASI-4.2 as part of this checkpoint.
 6. Preserve P3P11–P3P19 as planned backlog items until individually
    implemented and verified.
@@ -447,9 +456,9 @@ When future work changes project state:
 
 **Current project position:**
 
-`Phase 3 → ASI-4 → ASI-4.1 registry implemented and locally tested;
-GitHub CI artifact and device verification pending.`
+`Phase 3 → ASI-4 → ASI-4.1 registry implemented, tested, CI-built,
+installed from GitHub Actions, and device-verified.`
 
 **Current documentation Git checkpoint:**
 
-`179f3e1` — ASI-4.1 source checkpoint; this roadmap update is a separate documentation checkpoint.
+`179f3e1` — ASI-4.1 source checkpoint; `9b5c3ec` — roadmap update; final verification record to be committed.
