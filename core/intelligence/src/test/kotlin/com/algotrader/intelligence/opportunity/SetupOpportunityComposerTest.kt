@@ -1,5 +1,6 @@
 package com.algotrader.intelligence.opportunity
 
+import com.algotrader.intelligence.common.getOrThrow
 import com.algotrader.domain.Instrument
 import com.algotrader.domain.Timeframe
 import com.algotrader.intelligence.confidence.ConfidenceReading
@@ -282,6 +283,190 @@ class SetupOpportunityComposerTest {
                 t0
             )
         }
+    }
+
+    // ASI-4.1 registry regression tests
+
+    private fun candidate(
+        setup: BreakoutSetup = setup(BreakoutDirection.UP),
+        targetInstrument: InstrumentRef = instrument,
+        targetTimeframe: Timeframe = Timeframe.MINUTE_15,
+        evaluatedAt: Instant = t0
+    ): SetupOpportunityCandidate {
+        val ctx = context(setup)
+        return SetupOpportunityCandidate(
+            setup = setup,
+            strategy = strategy,
+            instrument = targetInstrument,
+            timeframe = targetTimeframe,
+            assessment = liveAssessment(setup),
+            context = ctx,
+            confluence = SetupConfluenceAssessmentEngine.assess(ctx),
+            evaluatedAt = evaluatedAt
+        )
+    }
+
+    @Test
+    fun `registry returns existing opportunity for duplicate occurrence`() {
+        val registry = OpportunityRegistry()
+        val input = candidate()
+
+        val first = registry.submit(input)
+        val second = registry.submit(input)
+
+        val created = (first as com.algotrader.intelligence.common.TransitionResult.Applied).value
+        val duplicate = (second as com.algotrader.intelligence.common.TransitionResult.Applied).value
+
+        assertTrue(created is OpportunityRegistration.Created)
+        assertTrue(duplicate is OpportunityRegistration.AlreadyPresent)
+        assertEquals(1, registry.size())
+
+        assertEquals(
+            (created as OpportunityRegistration.Created).opportunity,
+            (duplicate as OpportunityRegistration.AlreadyPresent).opportunity
+        )
+    }
+
+    @Test
+    fun `same breakout id on different instruments creates separate opportunities`() {
+        val registry = OpportunityRegistry()
+        val otherInstrument = instrument.copy(
+            instrument = Instrument("BANKNIFTY26JANFUT", "NSE"),
+            underlying = "BANKNIFTY",
+            contractId = "BANKNIFTY26JANFUT"
+        )
+
+        val first = registry.submit(candidate())
+        val second = registry.submit(candidate(targetInstrument = otherInstrument))
+
+        assertTrue(first is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(second is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertEquals(2, registry.size())
+    }
+
+    @Test
+    fun `same occurrence on different timeframes creates separate opportunities`() {
+        val registry = OpportunityRegistry()
+
+        val first = registry.submit(candidate(targetTimeframe = Timeframe.MINUTE_15))
+        val second = registry.submit(candidate(targetTimeframe = Timeframe.MINUTE_30))
+
+        assertTrue(first is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(second is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertEquals(2, registry.size())
+    }
+
+    @Test
+    fun `new breakout occurrence with same id is registered separately`() {
+        val registry = OpportunityRegistry()
+        val original = setup(BreakoutDirection.UP)
+        val laterAt = t0.plusSeconds(60)
+        val laterSetup = original.copy(
+            breakout = original.breakout.copy(
+                breakAt = laterAt,
+                confirmedAt = laterAt
+            )
+        )
+
+        val first = registry.submit(candidate(original))
+        val second = registry.submit(
+            candidate(
+                setup = laterSetup,
+                evaluatedAt = laterAt
+            )
+        )
+
+        assertTrue(first is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(second is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertEquals(2, registry.size())
+    }
+
+    @Test
+    fun `older evaluation is rejected without changing registry`() {
+        val registry = OpportunityRegistry()
+        val later = t0.plusSeconds(120)
+        val earlier = t0.plusSeconds(60)
+
+        val accepted = registry.submit(candidate(evaluatedAt = later))
+        val stale = registry.submit(candidate(evaluatedAt = earlier))
+
+        assertTrue(accepted is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(stale is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(1, registry.size())
+    }
+
+    @Test
+    fun `invalid candidate is rejected without partial registration`() {
+        val registry = OpportunityRegistry()
+        val valid = candidate()
+        val invalid = valid.copy(
+            context = valid.context.copy(
+                breakoutId = BreakoutId("OTHER_BREAKOUT")
+            )
+        )
+
+        val result = registry.submit(invalid)
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(0, registry.size())
+
+        val validResult = registry.submit(valid)
+        assertTrue(validResult is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertEquals(1, registry.size())
+    }
+
+    @Test
+    fun `different strategy versions register independently`() {
+        val registry = OpportunityRegistry()
+        val original = candidate()
+        val nextVersion = original.copy(
+            strategy = original.strategy.copy(version = original.strategy.version + 1),
+            assessment = liveAssessment(
+                original.setup,
+                EvidenceLedger(
+                    listOf(
+                        EvidenceItem(
+                            id = EvidenceRef("live-trend-v2"),
+                            strategy = original.strategy.copy(version = original.strategy.version + 1),
+                            kind = EvidenceKind.TREND_ALIGNMENT,
+                            sample = EvidenceSample.LIVE,
+                            summary = "trend aligned for strategy v2",
+                            source = EvidenceSource(
+                                EvidenceSourceType.LIVE_MARKET_DATA,
+                                "${original.setup.breakout.id.value}@2"
+                            ),
+                            recordedAt = t0
+                        )
+                    )
+                )
+            )
+        )
+
+        val first = registry.submit(original)
+        val second = registry.submit(nextVersion)
+
+        assertTrue(first is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(second is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertEquals(2, registry.size())
+    }
+
+    @Test
+    fun `rejected candidate does not advance stream chronology`() {
+        val registry = OpportunityRegistry()
+        val valid = candidate()
+        val invalid = valid.copy(
+            context = valid.context.copy(
+                breakoutId = BreakoutId("INVALID_BREAKOUT")
+            ),
+            evaluatedAt = t0.plusSeconds(120)
+        )
+
+        val rejected = registry.submit(invalid)
+        val accepted = registry.submit(valid.copy(evaluatedAt = t0.plusSeconds(60)))
+
+        assertTrue(rejected is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertTrue(accepted is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertEquals(1, registry.size())
     }
 
     private fun liveAssessment(
