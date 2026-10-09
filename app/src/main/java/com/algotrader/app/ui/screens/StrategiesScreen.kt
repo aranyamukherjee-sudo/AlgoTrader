@@ -8,6 +8,7 @@ import com.algotrader.app.asi2.Asi2DeviceHarness
 import com.algotrader.app.asi3.Asi3DeviceHarness
 import com.algotrader.app.asi3.Asi33DeviceHarness
 import com.algotrader.app.asi3.Asi34DeviceHarness
+import com.algotrader.app.asi3.Asi35DeviceHarness
 import com.algotrader.app.asi3.Asi36DeviceHarness
 import com.algotrader.app.ui.components.AltrixaTone
 import com.algotrader.app.ui.components.altrixaCard
@@ -366,6 +367,68 @@ object StrategiesScreen {
         )
 
         container.addView(asi34Card, topGap)
+
+        val asi35Card = altrixaCard(context)
+        asi35Card.addView(
+            altrixaLabel(
+                context,
+                "Verify setup context, independent confluence, level conflicts, lifecycle cutoffs and lookahead protection."
+            )
+        )
+
+        val asi35Button = android.widget.Button(context).apply {
+            text = "Run ASI-3.5 Setup Context Test"
+            setOnClickListener {
+                try {
+                    val result = Asi35DeviceHarness.run()
+                    val details = buildString {
+                        appendLine("Strong confluence: ${result.strongConfluencePassed}")
+                        appendLine("Supporting factor count: ${result.supportingKindCount}")
+                        appendLine("Supporting level found: ${result.supportingLevelFound}")
+                        appendLine("Conflicting level detected: ${result.conflictingLevelDetected}")
+                        appendLine("Conflict quality check: ${result.conflictQualityPassed}")
+                        appendLine("Future evidence excluded: ${result.futureEvidenceExcluded}")
+                        appendLine("Full-series lookahead rejected: ${result.lookaheadRejected}")
+                        appendLine("Deterministic repeat: ${result.deterministic}")
+                        appendLine("Lifecycle stage: ${result.lifecycleStage}")
+                        appendLine()
+                        appendLine(result.message)
+                    }
+
+                    AlertDialog.Builder(context)
+                        .setTitle(
+                            if (result.passed) {
+                                "ASI-3.5 Setup Context Test PASSED"
+                            } else {
+                                "ASI-3.5 Setup Context Test FAILED"
+                            }
+                        )
+                        .setMessage(details)
+                        .setPositiveButton("OK", null)
+                        .show()
+                } catch (t: Throwable) {
+                    AlertDialog.Builder(context)
+                        .setTitle("ASI-3.5 Setup Context Test FAILED")
+                        .setMessage(
+                            "${t.javaClass.simpleName}: ${t.message ?: "unknown error"}"
+                        )
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+        }
+
+        asi35Card.addView(
+            asi35Button,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = context.dpToPx(8)
+            }
+        )
+
+        container.addView(asi35Card, topGap)
 
         val asi36Card = altrixaCard(context)
         asi36Card.addView(
