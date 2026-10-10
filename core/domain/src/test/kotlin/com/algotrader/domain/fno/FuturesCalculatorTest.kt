@@ -5,6 +5,7 @@ import java.math.RoundingMode
 import java.time.LocalDate
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -713,6 +714,51 @@ class FuturesCalculatorTest {
         val capped = syntheticSchedule(listOf(comp("pct", both, ChargeBasis.RateOfLegValue(bd("0.0001")), min = Bound.Of(bd("200")), cap = Bound.Of(bd("300")))))
         assertEquals(0, bd("200").compareTo(capped.legCharges(Side.BUY, bd("1463800")).total)) // 146.38 -> minimum
         assertEquals(0, bd("300").compareTo(capped.legCharges(Side.BUY, bd("9000000")).total)) // 900 -> cap
+    }
+
+    @Test
+    fun `validated schedule is isolated from caller mutations`() {
+        val mutableSides = mutableSetOf(Side.BUY, Side.SELL)
+        val mutableComponents = mutableListOf(
+            comp("base", mutableSides, ChargeBasis.FlatPerLeg(bd("10"))),
+            comp(
+                "dependent",
+                both,
+                ChargeBasis.RateOfComponent("base", bd("0.1")),
+            ),
+        )
+        val definition = syntheticDefinition(components = mutableComponents)
+
+        val schedule = when (
+            val result = ValidatedChargeSchedule.validate(definition)
+        ) {
+            is ScheduleValidation.Valid -> result.schedule
+            is ScheduleValidation.Rejected -> fail(
+                "schedule rejected: ${result.errors}",
+            )
+        }
+
+        // Changes to the original input must not alter validated behavior.
+        mutableSides.clear()
+        mutableSides.add(Side.SELL)
+        mutableComponents.clear()
+
+        assertEquals(
+            0,
+            bd("11").compareTo(schedule.legCharges(Side.BUY, bd("100")).total),
+        )
+        assertEquals(
+            0,
+            bd("11").compareTo(schedule.legCharges(Side.SELL, bd("100")).total),
+        )
+
+        // The collections exposed by the validated schedule must reject mutation.
+        assertFailsWith<UnsupportedOperationException> {
+            (schedule.components as MutableList<ChargeComponentSpec>).clear()
+        }
+        assertFailsWith<UnsupportedOperationException> {
+            (schedule.components.first().appliesTo as MutableSet<Side>).clear()
+        }
     }
 
     // ---- schedule validation (§8.5) --------------------------------------------------------------------------------------------------------

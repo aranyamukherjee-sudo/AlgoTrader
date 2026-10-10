@@ -172,6 +172,16 @@ class ValidatedChargeSchedule private constructor(
          *    dependent uses the rounded or unrounded value is undefined).
          */
         fun validate(def: ChargeScheduleDefinition): ScheduleValidation {
+            // Snapshot caller-owned collections before validating or retaining them.
+            val components = java.util.Collections.unmodifiableList(
+                def.components.map { component ->
+                    component.copy(
+                        appliesTo = java.util.Collections.unmodifiableSet(
+                            java.util.LinkedHashSet(component.appliesTo),
+                        ),
+                    )
+                },
+            )
             val errors = ArrayList<String>()
             if (def.broker.isBlank()) errors += "broker is required"
             if (def.exchange.isBlank()) errors += "exchange is required"
@@ -187,10 +197,10 @@ class ValidatedChargeSchedule private constructor(
             val src = def.source
             if (src == null) errors += "authoritative source is required"
             else if (src.citation.isBlank()) errors += "source citation must identify the document"
-            if (def.components.isEmpty()) errors += "at least one component is required"
+            if (components.isEmpty()) errors += "at least one component is required"
 
             val earlier = LinkedHashMap<String, ChargeComponentSpec>()
-            for (c in def.components) {
+            for (c in components) {
                 val n = c.name
                 if (n.isBlank()) { errors += "component name is required"; continue }
                 if (n in earlier) errors += "$n: duplicate component name"
@@ -227,7 +237,7 @@ class ValidatedChargeSchedule private constructor(
                 ValidatedChargeSchedule(
                     def.broker.trim(), def.exchange.trim(), def.segment.trim(),
                     def.effectiveFrom!!, def.effectiveTo, def.source!!,
-                    def.components.toList(), def.keyedByOrderType, def.keyedByProduct,
+                    components, def.keyedByOrderType, def.keyedByProduct,
                 ),
             )
         }
