@@ -503,6 +503,50 @@ class OpportunityRegistry {
         TransitionResult.Applied(updated)
     }
 
+    /**
+     * Return matching registered opportunities in deterministic order.
+     *
+     * All supplied filters are combined with AND semantics. Results are
+     * copied while holding the registry lock; callers cannot mutate the
+     * registry through the returned list.
+     *
+     * Ordering is independent of registration order. The existing
+     * [snapshot] method retains its insertion-order contract.
+     */
+    fun query(filter: OpportunityQuery = OpportunityQuery()): List<Opportunity> =
+        synchronized(lock) {
+            opportunities.values
+                .asSequence()
+                .filter { opportunity ->
+                    (filter.id == null || opportunity.id == filter.id) &&
+                        (filter.strategy == null || opportunity.strategy == filter.strategy) &&
+                        (filter.instrument == null || opportunity.instrument == filter.instrument) &&
+                        (filter.timeframe == null || opportunity.timeframe == filter.timeframe) &&
+                        (filter.states.isEmpty() || opportunity.state in filter.states) &&
+                        (filter.includeTerminal || !opportunity.state.isTerminal)
+                }
+                .sortedWith(
+                    compareBy<Opportunity> { it.detectedAt }
+                        .thenBy { it.id.value }
+                        .thenBy { it.strategy.id.value }
+                        .thenBy { it.strategy.version }
+                        .thenBy { it.instrument.instrument.exchange }
+                        .thenBy { it.instrument.instrument.symbol }
+                        .thenBy { it.instrument.instrument.currency }
+                        .thenBy { it.instrument.kind.name }
+                        .thenBy { it.instrument.underlying.orEmpty() }
+                        .thenBy { it.instrument.contractId.orEmpty() }
+                        .thenBy { it.timeframe.ordinal }
+                        .thenBy { it.state.name }
+                        .thenBy { it.updatedAt }
+                )
+                .toList()
+        }
+
+    /** Return all non-terminal registered opportunities in deterministic order. */
+    fun activeSnapshot(): List<Opportunity> =
+        query(OpportunityQuery(includeTerminal = false))
+
     /** Snapshot of registered opportunities in deterministic insertion order. */
     fun snapshot(): List<Opportunity> = synchronized(lock) {
         opportunities.values.toList()

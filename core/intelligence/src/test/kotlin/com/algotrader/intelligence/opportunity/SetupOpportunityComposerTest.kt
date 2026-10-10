@@ -1324,6 +1324,102 @@ class SetupOpportunityComposerTest {
         assertEquals(before, registry.snapshot())
     }
 
+    // ASI-4.7 deterministic registry query tests
+
+    @Test
+    fun `query returns ambiguous ids as all matching occurrences`() {
+        val registry = OpportunityRegistry()
+        val original = setup(BreakoutDirection.UP)
+        val laterAt = t0.plusSeconds(60)
+        val laterOccurrence = original.copy(
+            breakout = original.breakout.copy(
+                breakAt = laterAt,
+                confirmedAt = laterAt
+            )
+        )
+
+        registry.submit(candidate(setup = original))
+        registry.submit(candidate(setup = laterOccurrence, evaluatedAt = laterAt))
+
+        val matches = registry.query(
+            OpportunityQuery(id = OpportunityId("test-strategy@3#UP:105.0:a1"))
+        )
+
+        assertEquals(2, matches.size)
+        assertTrue(matches.all { it.id.value == "test-strategy@3#UP:105.0:a1" })
+    }
+
+    @Test
+    fun `query filters use exact strategy instrument timeframe and state`() {
+        val registry = OpportunityRegistry()
+        registry.submit(candidate())
+        registry.submit(
+            candidate(
+                setup = setup(BreakoutDirection.DOWN),
+                targetTimeframe = Timeframe.MINUTE_30
+            )
+        )
+
+        val matches = registry.query(
+            OpportunityQuery(
+                strategy = strategy,
+                instrument = instrument,
+                timeframe = Timeframe.MINUTE_15,
+                states = setOf(OpportunityState.OPPORTUNITY_FOUND)
+            )
+        )
+
+        assertEquals(1, matches.size)
+        assertEquals(Timeframe.MINUTE_15, matches.single().timeframe)
+        assertEquals(OpportunityState.OPPORTUNITY_FOUND, matches.single().state)
+    }
+
+    @Test
+    fun `query ordering is deterministic regardless of submission order`() {
+        val up = candidate(setup = setup(BreakoutDirection.UP))
+        val down = candidate(setup = setup(BreakoutDirection.DOWN))
+
+        val firstRegistry = OpportunityRegistry()
+        firstRegistry.submit(up)
+        firstRegistry.submit(down)
+
+        val secondRegistry = OpportunityRegistry()
+        secondRegistry.submit(down)
+        secondRegistry.submit(up)
+
+        assertEquals(
+            firstRegistry.query().map { it.id },
+            secondRegistry.query().map { it.id }
+        )
+
+    }
+
+    @Test
+    fun `active query excludes terminal opportunities without mutating registry`() {
+        val registry = OpportunityRegistry()
+        val submitted = registry.submit(candidate())
+        assertTrue(submitted is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val opportunity = (
+            (submitted as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val cancelled = registry.updateRegistered(opportunity.id) {
+            it.cancel(
+                CancellationReason.CONDITIONS_WEAKENED,
+                "query regression test",
+                t0.plusSeconds(1)
+            )
+        }
+        assertTrue(cancelled is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val before = registry.snapshot()
+        assertTrue(registry.activeSnapshot().isEmpty())
+        assertEquals(1, registry.query().size)
+        assertEquals(before, registry.snapshot())
+    }
+
     // ASI-4.1 registry regression tests
 
     private fun candidate(
