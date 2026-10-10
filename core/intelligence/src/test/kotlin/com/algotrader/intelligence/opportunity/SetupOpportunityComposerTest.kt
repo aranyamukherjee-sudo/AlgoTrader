@@ -484,6 +484,101 @@ class SetupOpportunityComposerTest {
     }
 
     @Test
+    fun `registry reassessment appends new live evidence`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+        val at = opportunity.updatedAt.plusSeconds(1)
+        val evidence = EvidenceItem(
+            id = EvidenceRef("reassessment-evidence"),
+            strategy = opportunity.strategy,
+            kind = EvidenceKind.CURRENT_PATTERN_MATCH,
+            sample = EvidenceSample.LIVE,
+            summary = "pattern remains valid",
+            source = EvidenceSource(
+                EvidenceSourceType.LIVE_MARKET_DATA,
+                "reassessment-snapshot-1"
+            ),
+            recordedAt = at
+        )
+
+        val result = registry.reassessRegistered(
+            id = opportunity.id,
+            confidence = 0.61,
+            at = at,
+            reason = "pattern reassessed",
+            newEvidence = listOf(evidence)
+        )
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Applied)
+        val updated =
+            (result as com.algotrader.intelligence.common.TransitionResult.Applied).value
+        assertEquals(opportunity.state, updated.state)
+        assertEquals(opportunity.transitions, updated.transitions)
+        assertEquals(opportunity.execution, updated.execution)
+        assertEquals(opportunity.confidenceHistory.readings.size + 1,
+            updated.confidenceHistory.readings.size)
+        assertEquals(opportunity.evidence.items + evidence, updated.evidence.items)
+        assertEquals(updated, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry reassessment rejects terminal opportunity atomically`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val cancellation = registry.updateRegistered(opportunity.id) {
+            it.cancel(
+                CancellationReason.CONDITIONS_WEAKENED,
+                "conditions weakened",
+                it.updatedAt.plusSeconds(1)
+            )
+        }
+        assertTrue(cancellation is com.algotrader.intelligence.common.TransitionResult.Applied)
+        val cancelled = registry.snapshot().single()
+
+        val result = registry.reassessRegistered(
+            id = opportunity.id,
+            confidence = 0.4,
+            at = cancelled.updatedAt.plusSeconds(1),
+            reason = "attempt to reassess cancelled setup"
+        )
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(cancelled, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry reassessment rejects duplicate evidence atomically`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+        val existingEvidence = opportunity.evidence.items.first()
+        val before = registry.snapshot().single()
+
+        val result = registry.reassessRegistered(
+            id = opportunity.id,
+            confidence = 0.6,
+            at = opportunity.updatedAt.plusSeconds(1),
+            reason = "duplicate evidence attempt",
+            newEvidence = listOf(existingEvidence)
+        )
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(before, registry.snapshot().single())
+    }
+
+    @Test
     fun `registry rejects reassessment confidence with mismatched update timestamp`() {
         val registry = OpportunityRegistry()
         val created = registry.submit(candidate())

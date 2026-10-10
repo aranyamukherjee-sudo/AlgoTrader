@@ -4,6 +4,7 @@ import com.algotrader.domain.Timeframe
 import com.algotrader.intelligence.common.TransitionResult
 import com.algotrader.intelligence.dna.InstrumentRef
 import com.algotrader.intelligence.dna.StrategyRef
+import com.algotrader.intelligence.evidence.EvidenceItem
 import com.algotrader.intelligence.setup.BreakoutId
 import com.algotrader.intelligence.setup.BreakoutSetup
 import com.algotrader.intelligence.setup.SetupLiveAssessment
@@ -132,6 +133,27 @@ class OpportunityRegistry {
         latestEvaluationByStream[stream] = candidate.evaluatedAt
 
         TransitionResult.Applied(OpportunityRegistration.Created(composed))
+    }
+
+    /**
+     * Reassess one registered opportunity without advancing its lifecycle.
+     *
+     * Confidence and new live evidence are appended through the domain model;
+     * the registry's normal validation keeps rejection atomic.
+     */
+    fun reassessRegistered(
+        id: OpportunityId,
+        confidence: Double,
+        at: Instant,
+        reason: String,
+        newEvidence: List<EvidenceItem> = emptyList()
+    ): TransitionResult<Opportunity> = updateRegistered(id) { opportunity ->
+        opportunity.reassess(
+            confidence = confidence,
+            at = at,
+            reason = reason,
+            newEvidence = newEvidence
+        )
     }
 
     /**
