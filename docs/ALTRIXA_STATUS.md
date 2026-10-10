@@ -65,7 +65,7 @@
 | ASI-1 | Intelligence Foundation | ✅ COMPLETE |
 | ASI-2 | Automatic Strategy Discovery | ✅ COMPLETE |
 | ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5/3.6 complete; ASI-3.7 pipeline integration/device checkpoint reported passed; later ASI-3 scope remains to be reconciled |
-| ASI-4 | Opportunity Detection | 🟡 ACTIVE — ASI-4.1 through ASI-4.9 implemented; focused/full JVM tests passed; manual Android smoke test passed |
+| ASI-4 | Opportunity Detection | ✅ COMPLETE — ASI-4.1 through ASI-4.9 complete; focused/full JVM tests passed; five user-reported Android smoke checks passed |
 | ASI-5 | Entry Intelligence | ⏳ FUTURE |
 | ASI-6 | Exit Intelligence | ⏳ FUTURE |
 | ASI-7 | Confidence & Evidence Engine | ⏳ FUTURE |
@@ -439,9 +439,9 @@ Normal Android APK installation through the device/Downloads workflow remains th
 
 ## Immediate target
 
-**Preserve the ASI-4.1–ASI-4.9 checkpoint and continue verification from this baseline.**
+**ASI-4 Opportunity Detection is complete; preserve its ASI-4.1–ASI-4.9 checkpoint and proceed to the next roadmap milestone.**
 
-1. ASI-4.1 through ASI-4.9 are implemented and checkpointed on GitHub `main`.
+1. ASI-4.1 through ASI-4.9 are COMPLETE and checkpointed on GitHub `main`.
 2. ASI-4.9 focused tests and full `./gradlew test` passed.
 3. User-reported Android smoke checks 1–5 passed: launch, navigation, market data, strategies/backtest, and Play Protect.
 4. Android Release workflow #127 succeeded for ASI-4.9 source commit `7edafe333875015995b146ae6e1f054a142b2a0f`; its artifact was uploaded and all five user-reported Android smoke checks passed. The installed APK's byte-for-byte match to that artifact remains unverified.
@@ -463,7 +463,7 @@ When future work changes project state:
 
 **Current project position:**
 
-`Phase 3 → ASI-4 → ASI-4.1 through ASI-4.9 implemented and committed; ASI-4.9 focused/full JVM tests passed; manual Android smoke checks 1–5 reported passing.`
+`Phase 3 → ASI-4 Opportunity Detection COMPLETE → ASI-4.1 through ASI-4.9 complete and committed; focused/full JVM tests passed; manual Android smoke checks 1–5 reported passing.`
 
 **Current source checkpoint:**
 
