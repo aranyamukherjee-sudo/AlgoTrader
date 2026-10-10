@@ -269,7 +269,14 @@ object FuturesCalculator {
         differs("exchange", i.exchange, known.exchange)
         differs("segment", i.segment, known.segment)
         val date = dateR.requireValue()
-        if (date < known.effectiveFrom) problems += "estimate date $date is before the schedule's effective-from ${known.effectiveFrom}"
+        if (date < known.effectiveFrom) {
+            problems += "estimate date $date is before the schedule's effective-from ${known.effectiveFrom}"
+        }
+        known.effectiveTo?.let { end ->
+            if (date > end) {
+                problems += "estimate date $date is after the schedule's effective-to $end"
+            }
+        }
         return if (problems.isEmpty()) candidate
         else FnoResult.notModelled(candidate.dependsOn, emptySet(), candidate.warnings + problems)
     }

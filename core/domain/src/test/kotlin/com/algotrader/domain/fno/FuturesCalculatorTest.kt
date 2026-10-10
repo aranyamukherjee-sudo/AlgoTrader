@@ -71,11 +71,15 @@ class FuturesCalculatorTest {
 
     private val both = setOf(Side.BUY, Side.SELL)
 
-    private fun syntheticDefinition(components: List<ChargeComponentSpec>? = null) = ChargeScheduleDefinition(
+    private fun syntheticDefinition(
+        components: List<ChargeComponentSpec>? = null,
+        effectiveTo: LocalDate? = null,
+    ) = ChargeScheduleDefinition(
         broker = "TestBroker",
         exchange = "NSE",
         segment = "FUTIDX",
         effectiveFrom = LocalDate.of(2026, 1, 1),
+        effectiveTo = effectiveTo,
         source = syntheticSource,
         components = components ?: listOf(
             comp("flat", both, ChargeBasis.FlatPerLeg(bd("20"))),
@@ -87,8 +91,11 @@ class FuturesCalculatorTest {
         keyedByProduct = false,
     )
 
-    private fun syntheticSchedule(components: List<ChargeComponentSpec>? = null): ValidatedChargeSchedule =
-        when (val v = ValidatedChargeSchedule.validate(syntheticDefinition(components))) {
+    private fun syntheticSchedule(
+        components: List<ChargeComponentSpec>? = null,
+        effectiveTo: LocalDate? = null,
+    ): ValidatedChargeSchedule =
+        when (val v = ValidatedChargeSchedule.validate(syntheticDefinition(components, effectiveTo))) {
             is ScheduleValidation.Valid -> v.schedule
             is ScheduleValidation.Rejected -> fail("synthetic schedule rejected: ${v.errors}")
         }
@@ -375,6 +382,41 @@ class FuturesCalculatorTest {
         val c = FuturesCalculator.calculate(priced(schedule = syntheticSchedule()).copy(estimateDate = Input.Known(LocalDate.of(2025, 12, 31))))
         assertEquals(ResultKind.NOT_MODELLED, c.roundTripCharges.kind)
         assertTrue(c.roundTripCharges.warnings.any { "before the schedule's effective-from" in it })
+    }
+
+    @Test
+    fun `13c1 schedule remains valid through its inclusive effective-to date`() {
+        val end = LocalDate.of(2026, 1, 31)
+        val schedule = syntheticSchedule(effectiveTo = end)
+
+        val valid = FuturesCalculator.calculate(
+            priced(schedule = schedule).copy(estimateDate = Input.Known(end)),
+        )
+        assertTrue(valid.roundTripCharges.isAvailable)
+
+        val expired = FuturesCalculator.calculate(
+            priced(schedule = schedule).copy(
+                estimateDate = Input.Known(end.plusDays(1)),
+            ),
+        )
+        assertEquals(ResultKind.NOT_MODELLED, expired.roundTripCharges.kind)
+        assertEquals(ResultKind.NOT_MODELLED, expired.netPnl.kind)
+        assertTrue(
+            expired.roundTripCharges.warnings.any {
+                "after the schedule's effective-to $end" in it
+            },
+        )
+        assertValue("5200", expired.grossPnl)
+    }
+
+    @Test
+    fun `13c2 schedule without effective-to remains open-ended`() {
+        val c = FuturesCalculator.calculate(
+            priced(schedule = syntheticSchedule()).copy(
+                estimateDate = Input.Known(LocalDate.of(2030, 1, 1)),
+            ),
+        )
+        assertTrue(c.roundTripCharges.isAvailable)
     }
 
     @Test
@@ -682,6 +724,14 @@ class FuturesCalculatorTest {
 
         val base = syntheticDefinition()
         assertTrue(rejected(base.copy(effectiveFrom = null)).any { "effective-from" in it })
+        assertTrue(
+            rejected(
+                base.copy(
+                    effectiveFrom = LocalDate.of(2026, 1, 2),
+                    effectiveTo = LocalDate.of(2026, 1, 1),
+                ),
+            ).any { "effective-to date must not be before" in it },
+        )
         assertTrue(rejected(base.copy(source = null)).any { "source" in it })
         assertTrue(rejected(base.copy(source = syntheticSource.copy(citation = " "))).any { "citation" in it })
         assertTrue(rejected(base.copy(components = emptyList())).any { "at least one component" in it })

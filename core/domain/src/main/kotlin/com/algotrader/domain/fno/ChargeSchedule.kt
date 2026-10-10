@@ -65,13 +65,15 @@ data class ChargeComponentSpec(
 /**
  * Candidate schedule. [effectiveFrom] and [source] are nullable only so that
  * their absence can be reported by validation; a schedule missing either is
- * rejected. Component evaluation order is the list order, as declared.
+ * rejected. [effectiveTo], when supplied, is inclusive. Component evaluation
+ * order is the list order, as declared.
  */
 data class ChargeScheduleDefinition(
     val broker: String,
     val exchange: String,
     val segment: String,
     val effectiveFrom: LocalDate?,
+    val effectiveTo: LocalDate? = null,
     val source: ScheduleSource?,
     val components: List<ChargeComponentSpec>,
     /** True if the schedule's charges depend on order type (I13); then I13 must be supplied. */
@@ -108,6 +110,7 @@ class ValidatedChargeSchedule private constructor(
     val exchange: String,
     val segment: String,
     val effectiveFrom: LocalDate,
+    val effectiveTo: LocalDate?,
     val source: ScheduleSource,
     val components: List<ChargeComponentSpec>,
     val keyedByOrderType: Boolean,
@@ -174,6 +177,13 @@ class ValidatedChargeSchedule private constructor(
             if (def.exchange.isBlank()) errors += "exchange is required"
             if (def.segment.isBlank()) errors += "segment is required"
             if (def.effectiveFrom == null) errors += "effective-from date is required"
+            if (
+                def.effectiveFrom != null &&
+                def.effectiveTo != null &&
+                def.effectiveTo < def.effectiveFrom
+            ) {
+                errors += "effective-to date must not be before the effective-from date"
+            }
             val src = def.source
             if (src == null) errors += "authoritative source is required"
             else if (src.citation.isBlank()) errors += "source citation must identify the document"
@@ -216,8 +226,8 @@ class ValidatedChargeSchedule private constructor(
             return ScheduleValidation.Valid(
                 ValidatedChargeSchedule(
                     def.broker.trim(), def.exchange.trim(), def.segment.trim(),
-                    def.effectiveFrom!!, def.source!!, def.components.toList(),
-                    def.keyedByOrderType, def.keyedByProduct,
+                    def.effectiveFrom!!, def.effectiveTo, def.source!!,
+                    def.components.toList(), def.keyedByOrderType, def.keyedByProduct,
                 ),
             )
         }
