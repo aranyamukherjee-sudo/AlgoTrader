@@ -792,6 +792,46 @@ class FuturesCalculatorTest {
     }
 
     @Test
+    fun `break-even includes dependent component charges`() {
+        val schedule = syntheticSchedule(
+            listOf(
+                comp("base", both, ChargeBasis.FlatPerLeg(bd("20"))),
+                comp("dependent", both, ChargeBasis.RateOfComponent("base", bd("0.5"))),
+            ),
+        )
+        val entry = bd("22520")
+        val result = FuturesCalculator.calculate(priced(schedule = schedule, exit = null))
+        val be = result.breakEvenLong.value ?: fail("expected LONG break-even")
+
+        // Each leg costs 20 + 50% of 20 = 30, so a 65-unit position
+        // needs 60 / 65 points of upward movement to break even.
+        val expected = entry.add(bd("60").divide(bd("65"), java.math.MathContext.DECIMAL128))
+        assertTrue(be.subtract(expected).abs() < bd("1E-25"), "expected $expected but got $be")
+    }
+
+    @Test
+    fun `break-even is not modelled when long closing rate is one hundred percent`() {
+        val schedule = syntheticSchedule(
+            listOf(comp("pct", both, ChargeBasis.RateOfLegValue(bd("1")))),
+        )
+        val result = FuturesCalculator.calculate(priced(schedule = schedule, exit = null))
+
+        assertEquals(ResultKind.NOT_MODELLED, result.breakEvenLong.kind)
+        assertTrue(result.breakEvenLong.warnings.any { "no unique solution" in it })
+    }
+
+    @Test
+    fun `short break-even is not modelled when charges exceed entry proceeds`() {
+        val schedule = syntheticSchedule(
+            listOf(comp("flat", both, ChargeBasis.FlatPerLeg(bd("800000")))),
+        )
+        val result = FuturesCalculator.calculate(priced(schedule = schedule, exit = null))
+
+        assertEquals(ResultKind.NOT_MODELLED, result.breakEvenShort.kind)
+        assertTrue(result.breakEvenShort.warnings.any { "no positive solution" in it })
+    }
+
+    @Test
     fun `break-even is unavailable for rounded or capped schedules and without a schedule`() {
         val rounded = syntheticSchedule(listOf(comp("pct", both, ChargeBasis.RateOfLegValue(bd("0.0001")), rounding = Rounding.To(2, RoundingMode.HALF_UP))))
         val c = FuturesCalculator.calculate(priced(schedule = rounded))
