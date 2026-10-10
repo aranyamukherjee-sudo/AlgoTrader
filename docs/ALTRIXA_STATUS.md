@@ -14,7 +14,7 @@
 |---|---|
 | Phase 1 — Foundation | ✅ COMPLETE |
 | Phase 2 — Market Data + UI | ✅ COMPLETE |
-| Phase 3 — Backtesting + Strategy Intelligence | 🟡 ACTIVE — P3P11 follow-up verification and ASI roadmap continue; P3P12 complete |
+| Phase 3 — Backtesting + Strategy Intelligence | 🟡 ACTIVE — P3P11 and P3P12 complete; ASI roadmap continues |
 | Phase 4 — Paper Execution | ⏳ FUTURE |
 | Phase 5 — Advanced Intelligence | ⏳ FUTURE |
 | Phase 6 — Broker Integration | ⏳ FUTURE |
@@ -42,7 +42,7 @@
 
 | Patch | Description | Status |
 |---|---|---|
-| P3P11 | Transaction Costs & Net P&L | 🟡 IMPLEMENTED / CI CHECKPOINTED; targeted nonzero-cost and persistence checks still need confirmation |
+| P3P11 | Transaction Costs & Net P&L | ✅ COMPLETE — 16 targeted cost/persistence tests passed; 0 failures, 0 errors |
 | P3P12 | CSV Export | ✅ COMPLETE — CSV download confirmed |
 | P3P13 | Break-even & F&O Cost Analytics | ⏳ PLANNED |
 | P3P14 | Backtest Performance Analytics | ⏳ PLANNED |
@@ -52,7 +52,7 @@
 | P3P18 | Data Robustness & Reproducibility | ⏳ PLANNED |
 | P3P19 | Results, Reporting & Export | ⏳ PLANNED |
 
-**Rule:** Treat each patch according to its recorded status above. P3P11 still needs explicit confirmation of nonzero-cost and persistence behavior; P3P12 CSV export is complete.
+**Rule:** Treat each patch according to its recorded status above. P3P11 nonzero-cost and persistence verification passed: 16 targeted tests, 0 failures, 0 errors. P3P12 CSV export is complete.
 
 ---
 
@@ -345,10 +345,7 @@ The user installed an APK and reported all five checks passing:
 | Strategy and Backtest functionality | ✅ PASS |
 | Google Play Protect / security check | ✅ PASS — no warning encountered |
 
-This is a user-reported manual smoke test. The exact installed APK source
-commit, APK digest, and associated Android Release workflow run have not been
-independently established. These checks alone do not prove every background,
-backend, or broker integration scenario.
+This is a user-reported manual smoke test. The Android Release workflow #127 succeeded for source commit `7edafe333875015995b146ae6e1f054a142b2a0f`, and its release artifact was uploaded. The exact installed APK-to-artifact byte-for-byte match remains unverified. These checks alone do not prove every background, backend, or broker integration scenario.
 
 ### ASI-4 boundaries
 
@@ -447,8 +444,8 @@ Normal Android APK installation through the device/Downloads workflow remains th
 1. ASI-4.1 through ASI-4.9 are implemented and checkpointed on GitHub `main`.
 2. ASI-4.9 focused tests and full `./gradlew test` passed.
 3. User-reported Android smoke checks 1–5 passed: launch, navigation, market data, strategies/backtest, and Play Protect.
-4. Exact installed APK provenance and the associated Android Release workflow result still need independent confirmation before recording release-artifact verification as commit-specific.
-5. P3P11 still needs explicit confirmation of nonzero transaction-cost calculations and persistence behavior.
+4. Android Release workflow #127 succeeded for ASI-4.9 source commit `7edafe333875015995b146ae6e1f054a142b2a0f`; its artifact was uploaded and all five user-reported Android smoke checks passed. The installed APK's byte-for-byte match to that artifact remains unverified.
+5. P3P11 nonzero-cost and persistence tests passed: 16 tests, 0 failures, 0 errors.
 6. P3P12 CSV export is complete; CSV download was confirmed.
 7. Do not repeat ASI-2 validation unless a regression is identified.
 8. Preserve unconfirmed ASI-3.8/ASI-3.9 scope as unresolved; reconcile the roadmap before naming new milestones.
@@ -472,4 +469,4 @@ When future work changes project state:
 
 `7edafe333875015995b146ae6e1f054a142b2a0f` — `ASI-4.9 deterministic opportunity query ordering`.
 
-**Remaining explicit verification items:** P3P11 nonzero-cost/persistence behavior and exact installed APK / release-workflow provenance for the recent manual Android smoke test.
+**Remaining explicit verification item:** the installed APK's byte-for-byte identity with the successful release artifact remains unverified.
