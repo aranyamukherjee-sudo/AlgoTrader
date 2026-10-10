@@ -10,6 +10,7 @@ import com.algotrader.app.backtest.BacktestCostPresentation
 import com.algotrader.app.backtest.BacktestFormat
 import com.algotrader.app.backtest.BacktestInstrumentType
 import com.algotrader.app.backtest.BacktestJobStore
+import com.algotrader.app.backtest.BacktestCsvExporter
 import com.algotrader.app.theme.AltrixaColors
 import com.algotrader.app.theme.AltrixaDimens
 import com.algotrader.app.theme.dpToPx
@@ -62,7 +63,8 @@ internal object BacktestResultsScreen {
         results: List<BacktestResult>,
         job: BacktestJobStore.Job?,
         onRunAgain: () -> Unit,
-        futuresAccounting: List<BacktestJobStore.RestoredFuturesAccounting> = emptyList()
+        futuresAccounting: List<BacktestJobStore.RestoredFuturesAccounting> = emptyList(),
+        onExportCsv: (String, String) -> Unit
     ) {
         BacktestScreen.header(context, container, "Performance report")
 
@@ -137,6 +139,34 @@ internal object BacktestResultsScreen {
             configurationCard(
                 context, container, results, instrumentName, timeframe,
                 candleCount, initialCapital, positionSizing, job
+            )
+        }
+
+        if (results.isNotEmpty()) {
+            val exportSymbol = job?.instrumentSymbol ?: instrumentName
+            val tradesCsv = BacktestCsvExporter.tradesCsv(
+                exportSymbol, timeframe, results, isFutures
+            )
+            val comparisonCsv = BacktestCsvExporter.comparisonCsv(
+                exportSymbol, timeframe, results, isFutures
+            )
+            container.addView(
+                altrixaSecondaryButton(context, "EXPORT TRADES CSV") {
+                    onExportCsv("ALTRIXA_trades.csv", tradesCsv)
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = context.dpToPx(AltrixaDimens.spaceSm) }
+            )
+            container.addView(
+                altrixaSecondaryButton(context, "EXPORT COMPARISON CSV") {
+                    onExportCsv("ALTRIXA_comparison.csv", comparisonCsv)
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = context.dpToPx(AltrixaDimens.spaceSm) }
             )
         }
 

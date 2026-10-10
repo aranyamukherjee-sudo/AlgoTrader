@@ -148,6 +148,7 @@ class MainActivity : Activity() {
         // Mirrors the backend's own /history cache TTL, so we don't refresh
         // more often than the backend data could actually change.
         private const val DISK_CACHE_TTL_MS = 5 * 60 * 1000L
+        private const val REQUEST_EXPORT_CSV = 7314
     }
 
     private lateinit var content: LinearLayout
@@ -159,6 +160,8 @@ class MainActivity : Activity() {
     private var selectedBacktestJobId: String? = null
     private var activeBacktestJobId: String? = null
     private var renderedBacktestJobId: String? = null
+    private var pendingCsvExport: String? = null
+    private var pendingCsvFilename: String? = null
 
     // Explicit UI state: Android Back should move from Results
     // to Backtest configuration before leaving the Backtest tab.
@@ -2689,6 +2692,53 @@ private var isHomeScreenActive = false
         }
     }
 
+    private fun saveCsvWithDocumentPicker(filename: String, csv: String) {
+        val intent = android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(android.content.Intent.CATEGORY_OPENABLE)
+            type = "text/csv"
+            putExtra(android.content.Intent.EXTRA_TITLE, filename)
+        }
+        pendingCsvExport = csv
+        pendingCsvFilename = filename
+        try {
+            startActivityForResult(intent, REQUEST_EXPORT_CSV)
+        } catch (error: Exception) {
+            pendingCsvExport = null
+            pendingCsvFilename = null
+            Toast.makeText(this, "Unable to open file picker: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    @Deprecated("Uses the platform document picker result API")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_EXPORT_CSV) return
+
+        val csv = pendingCsvExport
+        val filename = pendingCsvFilename ?: "ALTRIXA_export.csv"
+        pendingCsvExport = null
+        pendingCsvFilename = null
+
+        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            Toast.makeText(this, "CSV export cancelled.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (csv == null) {
+            Toast.makeText(this, "CSV export data is no longer available. Please retry.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        try {
+            val uri = data.data!!
+            val output = contentResolver.openOutputStream(uri)
+                ?: throw java.io.IOException("Could not open the selected file")
+            output.bufferedWriter(Charsets.UTF_8).use { it.write(csv) }
+            Toast.makeText(this, "Saved $filename", Toast.LENGTH_LONG).show()
+        } catch (error: Exception) {
+            Toast.makeText(this, "CSV export failed: ${error.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         backtestJobStore = BacktestJobStore(applicationContext)
 
@@ -4075,7 +4125,8 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
                         renderedBacktestJobId = null
                         renderBacktestConfiguration()
                     },
-                    futuresAccounting = futuresAccounting
+                    futuresAccounting = futuresAccounting,
+                    onExportCsv = { filename, csv -> saveCsvWithDocumentPicker(filename, csv) }
                 )
             } else {
                 content.removeAllViews()

@@ -1133,7 +1133,8 @@ object BacktestScreen {
         results: List<BacktestResult>,
         job: BacktestJobStore.Job? = null,
         onRunAgain: () -> Unit,
-        futuresAccounting: List<BacktestJobStore.RestoredFuturesAccounting> = emptyList()
+        futuresAccounting: List<BacktestJobStore.RestoredFuturesAccounting> = emptyList(),
+        onExportCsv: (String, String) -> Unit
     ) {
         BacktestResultsScreen.render(
             context,
@@ -1146,7 +1147,8 @@ object BacktestScreen {
             results,
             job,
             onRunAgain,
-            futuresAccounting
+            futuresAccounting,
+            onExportCsv
         )
     }
 
