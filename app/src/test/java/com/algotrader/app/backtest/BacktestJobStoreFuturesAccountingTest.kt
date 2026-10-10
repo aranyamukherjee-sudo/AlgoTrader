@@ -160,6 +160,39 @@ class BacktestJobStoreFuturesAccountingTest {
     }
 
     @Test
+    fun accountingDisplayStrings_roundTripWithoutBeingForcedToNotModelled() {
+        val dir = tempDir()
+        try {
+            val store = BacktestJobStore(dir)
+            val displayValues = block().copy(
+                leverage = "TEST_ONLY_LEVERAGE",
+                charges = "TEST_ONLY_CHARGES",
+                netPnl = "TEST_ONLY_NET_PNL",
+                breakEven = "TEST_ONLY_BREAK_EVEN"
+            )
+            val createdJob = job(store)
+
+            store.saveResults(
+                createdJob.id,
+                listOf(result()),
+                listOf(displayValues)
+            )
+
+            val restored =
+                store.getFuturesAccounting(createdJob.id).single()
+                    as BacktestJobStore.RestoredFuturesAccounting.Present
+
+            assertEquals(displayValues, restored.block)
+            assertEquals("TEST_ONLY_LEVERAGE", restored.block.leverage)
+            assertEquals("TEST_ONLY_CHARGES", restored.block.charges)
+            assertEquals("TEST_ONLY_NET_PNL", restored.block.netPnl)
+            assertEquals("TEST_ONLY_BREAK_EVEN", restored.block.breakEven)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun nullableEvidence_roundTripsWhenLotSizeIsUnknown() {
         val dir = tempDir()
         try {

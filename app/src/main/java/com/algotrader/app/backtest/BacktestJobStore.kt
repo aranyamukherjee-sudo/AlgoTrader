@@ -795,26 +795,10 @@ class BacktestJobStore internal constructor(
                         FuturesBacktestAccounting.Status
                             .valueOf(str("status")),
                     reason = strOrNull("reason"),
-                    leverage =
-                        constant(
-                            "leverage",
-                            FuturesBacktestAccounting.NOT_MODELLED
-                        ),
-                    charges =
-                        constant(
-                            "charges",
-                            FuturesBacktestAccounting.NOT_MODELLED
-                        ),
-                    netPnl =
-                        constant(
-                            "netPnl",
-                            FuturesBacktestAccounting.NOT_MODELLED
-                        ),
-                    breakEven =
-                        constant(
-                            "breakEven",
-                            FuturesBacktestAccounting.NOT_MODELLED
-                        )
+                    leverage = str("leverage"),
+                    charges = str("charges"),
+                    netPnl = str("netPnl"),
+                    breakEven = str("breakEven")
                 )
             )
         } catch (e: Exception) {
