@@ -667,14 +667,73 @@ class FuturesCalculatorTest {
 
     @Test
     fun `a schedule keyed by product needs the product`() {
-        val def = syntheticDefinition().copy(keyedByProduct = true)
+        val def = syntheticDefinition().copy(
+            keyedByProduct = true,
+            productTypeKey = ProductType.NRML,
+        )
         val schedule = (ValidatedChargeSchedule.validate(def) as ScheduleValidation.Valid).schedule
         val without = FuturesCalculator.calculate(priced(schedule = schedule))
         assertNotModelled(without.netPnl, InputId.PRODUCT)
         val with = FuturesCalculator.calculate(priced(schedule = schedule).copy(product = Input.Known(ProductType.NRML)))
         assertValue("4565.72", with.netPnl)
+
+        val mismatched = FuturesCalculator.calculate(
+            priced(schedule = schedule).copy(product = Input.Known(ProductType.MIS)),
+        )
+        assertEquals(ResultKind.NOT_MODELLED, mismatched.netPnl.kind)
+        assertTrue(mismatched.netPnl.warnings.any { "keyed to product" in it })
+        assertValue("5200", mismatched.grossPnl)
+
         // Order type does not matter unless the schedule keys on it (§8.2a I13).
         assertValue("4565.72", FuturesCalculator.calculate(priced(schedule = syntheticSchedule())).netPnl)
+    }
+
+    @Test
+    fun `a schedule keyed by order type requires and matches its explicit key`() {
+        val missingKey = ValidatedChargeSchedule.validate(
+            syntheticDefinition().copy(keyedByOrderType = true),
+        )
+        assertTrue(missingKey is ScheduleValidation.Rejected)
+
+        val schedule = when (
+            val validation = ValidatedChargeSchedule.validate(
+                syntheticDefinition().copy(
+                    keyedByOrderType = true,
+                    orderTypeKey = OrderType.LIMIT,
+                ),
+            )
+        ) {
+            is ScheduleValidation.Valid -> validation.schedule
+            is ScheduleValidation.Rejected -> fail("schedule rejected: ${validation.errors}")
+        }
+
+        val missingInput = FuturesCalculator.calculate(priced(schedule = schedule))
+        assertNotModelled(missingInput.netPnl, InputId.ORDER_TYPE)
+
+        val matching = FuturesCalculator.calculate(
+            priced(schedule = schedule).copy(orderType = Input.Known(OrderType.LIMIT)),
+        )
+        assertValue("4565.72", matching.netPnl)
+
+        val mismatched = FuturesCalculator.calculate(
+            priced(schedule = schedule).copy(orderType = Input.Known(OrderType.MARKET)),
+        )
+        assertEquals(ResultKind.NOT_MODELLED, mismatched.netPnl.kind)
+        assertTrue(mismatched.netPnl.warnings.any { "keyed to order type" in it })
+        assertValue("5200", mismatched.grossPnl)
+    }
+
+    @Test
+    fun `a schedule rejects a key when its corresponding key flag is false`() {
+        val product = ValidatedChargeSchedule.validate(
+            syntheticDefinition().copy(productTypeKey = ProductType.NRML),
+        )
+        assertTrue(product is ScheduleValidation.Rejected)
+
+        val orderType = ValidatedChargeSchedule.validate(
+            syntheticDefinition().copy(orderTypeKey = OrderType.LIMIT),
+        )
+        assertTrue(orderType is ScheduleValidation.Rejected)
     }
 
     @Test

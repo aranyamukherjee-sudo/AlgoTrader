@@ -80,6 +80,10 @@ data class ChargeScheduleDefinition(
     val keyedByOrderType: Boolean,
     /** True if the schedule's charges depend on product (I14); then I14 must be supplied. */
     val keyedByProduct: Boolean,
+    /** Required when keyedByOrderType is true; identifies the exact order type this schedule covers. */
+    val orderTypeKey: OrderType? = null,
+    /** Required when keyedByProduct is true; identifies the exact product type this schedule covers. */
+    val productTypeKey: ProductType? = null,
 )
 
 sealed interface ScheduleValidation {
@@ -115,6 +119,8 @@ class ValidatedChargeSchedule private constructor(
     val components: List<ChargeComponentSpec>,
     val keyedByOrderType: Boolean,
     val keyedByProduct: Boolean,
+    val orderTypeKey: OrderType?,
+    val productTypeKey: ProductType?,
 ) {
     /** Computes one leg's charges, component by component, in the schedule's declared order. */
     fun legCharges(side: Side, legValue: BigDecimal): LegCharges {
@@ -199,6 +205,19 @@ class ValidatedChargeSchedule private constructor(
             else if (src.citation.isBlank()) errors += "source citation must identify the document"
             if (components.isEmpty()) errors += "at least one component is required"
 
+            if (def.keyedByOrderType && def.orderTypeKey == null) {
+                errors += "order-type key is required when keyedByOrderType is true"
+            }
+            if (!def.keyedByOrderType && def.orderTypeKey != null) {
+                errors += "order-type key must be absent when keyedByOrderType is false"
+            }
+            if (def.keyedByProduct && def.productTypeKey == null) {
+                errors += "product-type key is required when keyedByProduct is true"
+            }
+            if (!def.keyedByProduct && def.productTypeKey != null) {
+                errors += "product-type key must be absent when keyedByProduct is false"
+            }
+
             val earlier = LinkedHashMap<String, ChargeComponentSpec>()
             for (c in components) {
                 val n = c.name
@@ -238,6 +257,7 @@ class ValidatedChargeSchedule private constructor(
                     def.broker.trim(), def.exchange.trim(), def.segment.trim(),
                     def.effectiveFrom!!, def.effectiveTo, def.source!!,
                     components, def.keyedByOrderType, def.keyedByProduct,
+                    def.orderTypeKey, def.productTypeKey,
                 ),
             )
         }

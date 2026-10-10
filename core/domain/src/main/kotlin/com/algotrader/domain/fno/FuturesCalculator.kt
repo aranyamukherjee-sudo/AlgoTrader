@@ -268,6 +268,20 @@ object FuturesCalculator {
         differs("broker", i.broker, known.broker)
         differs("exchange", i.exchange, known.exchange)
         differs("segment", i.segment, known.segment)
+
+        if (known.keyedByOrderType) {
+            val supplied = (i.orderType as? Input.Known)?.value
+            if (supplied != known.orderTypeKey) {
+                problems += "charge schedule is keyed to order type '${known.orderTypeKey}', not '$supplied'"
+            }
+        }
+        if (known.keyedByProduct) {
+            val supplied = (i.product as? Input.Known)?.value
+            if (supplied != known.productTypeKey) {
+                problems += "charge schedule is keyed to product '${known.productTypeKey}', not '$supplied'"
+            }
+        }
+
         val date = dateR.requireValue()
         if (date < known.effectiveFrom) {
             problems += "estimate date $date is before the schedule's effective-from ${known.effectiveFrom}"
