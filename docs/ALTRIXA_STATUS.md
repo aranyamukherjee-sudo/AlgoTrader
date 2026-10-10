@@ -14,7 +14,7 @@
 |---|---|
 | Phase 1 — Foundation | ✅ COMPLETE |
 | Phase 2 — Market Data + UI | ✅ COMPLETE |
-| Phase 3 — Backtesting + Strategy Intelligence | 🟡 ACTIVE — P3P11, P3P12 and P3P14 complete; ASI roadmap continues |
+| Phase 3 — Backtesting + Strategy Intelligence | 🟡 ACTIVE — P3P11, P3P12, P3P14 and P3P15 complete; ASI roadmap continues |
 | Phase 4 — Paper Execution | ⏳ FUTURE |
 | Phase 5 — Advanced Intelligence | ⏳ FUTURE |
 | Phase 6 — Broker Integration | ⏳ FUTURE |
@@ -46,13 +46,13 @@
 | P3P12 | CSV Export | ✅ COMPLETE — CSV download confirmed |
 | P3P13 | Break-even & F&O Cost Analytics | ⏳ PLANNED |
 | P3P14 | Backtest Performance Analytics & Cost-Adjusted Comparison | ✅ COMPLETE — local tests and debug build passed; commit `5c73ffd` |
-| P3P15 | Strategy Comparison & Ranking | ⏳ PLANNED |
+| P3P15 | Strategy Comparison & Ranking | ✅ COMPLETE — deterministic P&L ranking and alphabetical tie-breaking; commit `1b857c1` |
 | P3P16 | Strategy Intelligence & Diagnostics | ⏳ PLANNED |
 | P3P17 | Optimization & Walk-forward Testing | ⏳ PLANNED |
 | P3P18 | Data Robustness & Reproducibility | ⏳ PLANNED |
 | P3P19 | Results, Reporting & Export | ⏳ PLANNED |
 
-**Rule:** Treat each patch according to its recorded status above. P3P11 nonzero-cost and persistence verification passed: 16 targeted tests, 0 failures, 0 errors. P3P12 CSV export is complete and CSV download was confirmed. P3P14 is committed as `5c73ffd` (`feat: improve backtest cost analytics`). Validation: `./gradlew :backtest:test --rerun-tasks`, `./gradlew :app:testDebugUnitTest`, and `./gradlew :app:assembleDebug` all passed; `git diff --check` passed. The generated debug APK SHA-256 was `42365f98bbe74ded7a644fc7c43aed9b434849ee52eb9ff66fe8816982236d44`. These are local test/build results; no new release-CI or physical-device verification is claimed for P3P14.
+**Rule:** Treat each patch according to its recorded status above. P3P11 nonzero-cost and persistence verification passed: 16 targeted tests, 0 failures, 0 errors. P3P12 CSV export is complete and CSV download was confirmed. P3P14 is committed as `5c73ffd` (`feat: improve backtest cost analytics`). Validation: `./gradlew :backtest:test --rerun-tasks`, `./gradlew :app:testDebugUnitTest`, and `./gradlew :app:assembleDebug` all passed; `git diff --check` passed. The generated debug APK SHA-256 was `42365f98bbe74ded7a644fc7c43aed9b434849ee52eb9ff66fe8816982236d44`. These are local test/build results; no new release-CI or physical-device verification is claimed for P3P14. P3P15 is committed as `1b857c1` (`feat: add deterministic strategy ranking`). The focused `BacktestCostPresentationTest` and full `:app:testDebugUnitTest` task passed; `:app:assembleDebug` and `git diff --check` also passed. Debug APK SHA-256: `5ea8ca82bc748487ed8bed98883011a535881d76711e6bc25cc657cf6309ab19`. These are local test/build results; no release-CI or physical-device verification is claimed for P3P15.
 
 ---
 
