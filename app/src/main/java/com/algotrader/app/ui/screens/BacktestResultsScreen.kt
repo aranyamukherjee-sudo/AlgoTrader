@@ -507,6 +507,20 @@ internal object BacktestResultsScreen {
 
 // ---- KPI grid ----
         container.addView(altrixaSectionHeader(context, "Performance"))
+        BacktestCostPresentation.performanceMetricsCaption(
+            result.config.researchCostModel
+        )?.let { caption ->
+            container.addView(
+                altrixaLabel(context, caption).apply {
+                    textSize = AltrixaDimens.textSmall
+                    setTextColor(AltrixaColors.textMuted)
+                },
+                BacktestScreen.matchWidth(
+                    context,
+                    topMargin = AltrixaDimens.spaceSm
+                )
+            )
+        }
         val returnTone = if (m.totalReturnPercent >= 0.0) AltrixaTone.POSITIVE else AltrixaTone.NEGATIVE
 
         val winRateCard = altrixaMetricCard(

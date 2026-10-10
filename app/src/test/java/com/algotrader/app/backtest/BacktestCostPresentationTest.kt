@@ -64,6 +64,18 @@ class BacktestCostPresentationTest {
     }
 
     @Test
+    fun grossMetricsCaptionAppearsOnlyWhenAssumedCostsAreEnabled() {
+        assertEquals(
+            BacktestCostPresentation.GROSS_METRICS_CAPTION,
+            BacktestCostPresentation.performanceMetricsCaption(costed)
+        )
+        assertEquals(
+            null,
+            BacktestCostPresentation.performanceMetricsCaption(ResearchCostModel())
+        )
+    }
+
+    @Test
     fun sameNonZeroCostModelEnablesCostAdjustedComparison() {
         val a = result(costed, researchCosts = 20.0, costAdjustedNet = 80.0)
         val b = result(costed, researchCosts = 40.0, costAdjustedNet = 60.0)

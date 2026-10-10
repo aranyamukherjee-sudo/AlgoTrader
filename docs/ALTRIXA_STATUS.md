@@ -54,6 +54,20 @@
 
 **Rule:** Treat each patch according to its recorded status above. P3P11 nonzero-cost and persistence verification passed: 16 targeted tests, 0 failures, 0 errors. P3P12 CSV export is complete and CSV download was confirmed. P3P13-A/B/C implementation checkpoints are complete, including focused domain tests and break-even edge-case coverage; overall P3P13 remains in progress until sourced charge schedules, broker-fixture reconciliation, and production integration are addressed. P3P14 is committed as `5c73ffd` (`feat: improve backtest cost analytics`). Validation: `./gradlew :backtest:test --rerun-tasks`, `./gradlew :app:testDebugUnitTest`, and `./gradlew :app:assembleDebug` all passed; `git diff --check` passed. The generated debug APK SHA-256 was `42365f98bbe74ded7a644fc7c43aed9b434849ee52eb9ff66fe8816982236d44`. These are local test/build results; no new release-CI or physical-device verification is claimed for P3P14. P3P15 is committed as `1b857c1` (`feat: add deterministic strategy ranking`). The focused `BacktestCostPresentationTest` and full `:app:testDebugUnitTest` task passed; `:app:assembleDebug` and `git diff --check` also passed. Debug APK SHA-256: `5ea8ca82bc748487ed8bed98883011a535881d76711e6bc25cc657cf6309ab19`. These are local test/build results; no release-CI or physical-device verification is claimed for P3P15.
 
+P3P15 cost-presentation audit follow-up (2026-10-11):
+Performance statistics now display an explanatory caption when nonzero
+assumed research costs are configured: "Performance and trade statistics
+use gross P&L before assumed costs." The caption is omitted when the cost
+model is zero, and existing ranking and cost-adjusted comparison logic
+remain unchanged. Validation: focused BacktestCostPresentationTest passed
+(17 tests, 0 failures, 0 errors, 0 skipped); full
+./gradlew :app:testDebugUnitTest passed; ./gradlew :app:assembleDebug
+passed; git diff --check passed. Debug APK SHA-256:
+40d5673e5e7b2fe6b5de0ffa73999a1fe99253b0379c640db5e3093f0fbf5daa.
+These are local validation results only; no release-CI or physical-device
+verification is claimed for this follow-up.
+
+
 ---
 
 # 3. ASI — Algorithmic / Strategy Intelligence Roadmap

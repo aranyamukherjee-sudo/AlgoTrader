@@ -19,6 +19,9 @@ object BacktestCostPresentation {
     /** Label for the gross headline P&L, for index and futures alike. */
     const val PNL_BEFORE_COSTS = "P&L Before Costs"
 
+    const val GROSS_METRICS_CAPTION =
+        "Performance and trade statistics use gross P&L before assumed costs."
+
     const val COSTS_SECTION_TITLE = "Assumed research costs"
 
     const val SETUP_SECTION_TITLE = "Assumed research costs (optional)"
@@ -95,6 +98,11 @@ object BacktestCostPresentation {
     /** True only when the model actually charges something. */
     fun isVisible(model: ResearchCostModel): Boolean =
         !BacktestCostAssumptions.isZero(model)
+
+
+    /** Explanation for gross-based performance metrics when assumed costs are enabled. */
+    fun performanceMetricsCaption(model: ResearchCostModel): String? =
+        if (isVisible(model)) GROSS_METRICS_CAPTION else null
 
     fun assumptionCaption(isFutures: Boolean): String =
         if (isFutures) GENERIC_CAPTION + FUTURES_CAPTION_SUFFIX else GENERIC_CAPTION
