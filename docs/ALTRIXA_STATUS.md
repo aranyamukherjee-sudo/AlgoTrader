@@ -3,8 +3,8 @@
 **Last updated:** 2026-10-10
 **Repository:** `aranyamukherjee-sudo/AlgoTrader`  
 **Branch:** `main`  
-**Documentation checkpoint:** `150b0c3` — `docs: update ASI-3.6 project status`
-**ASI-3.5 source checkpoint:** `419e467` — `ASI-3.5 align device confluence assertion`
+**Latest verified ASI source checkpoint:** `7edafe333875015995b146ae6e1f054a142b2a0f` — `ASI-4.9 deterministic opportunity query ordering`
+**Prior source checkpoint:** `419e467` — `ASI-3.5 align device confluence assertion`
 
 ---
 
@@ -14,7 +14,7 @@
 |---|---|
 | Phase 1 — Foundation | ✅ COMPLETE |
 | Phase 2 — Market Data + UI | ✅ COMPLETE |
-| Phase 3 — Backtesting + Strategy Intelligence | 🟡 ACTIVE |
+| Phase 3 — Backtesting + Strategy Intelligence | 🟡 ACTIVE — P3P11 follow-up verification and ASI roadmap continue; P3P12 complete |
 | Phase 4 — Paper Execution | ⏳ FUTURE |
 | Phase 5 — Advanced Intelligence | ⏳ FUTURE |
 | Phase 6 — Broker Integration | ⏳ FUTURE |
@@ -38,12 +38,12 @@
 | P3P9 | F&O Calculations / Integration | ✅ COMPLETE |
 | P3P10 | F&O Accounting Adapter | ✅ VERIFIED |
 
-## Planned Backlog
+## Current Patch Status
 
 | Patch | Description | Status |
 |---|---|---|
-| P3P11 | Transaction Costs & Net P&L | ⏳ PLANNED |
-| P3P12 | Margin & Capital Modelling | ⏳ PLANNED |
+| P3P11 | Transaction Costs & Net P&L | 🟡 IMPLEMENTED / CI CHECKPOINTED; targeted nonzero-cost and persistence checks still need confirmation |
+| P3P12 | CSV Export | ✅ COMPLETE — CSV download confirmed |
 | P3P13 | Break-even & F&O Cost Analytics | ⏳ PLANNED |
 | P3P14 | Backtest Performance Analytics | ⏳ PLANNED |
 | P3P15 | Strategy Comparison & Ranking | ⏳ PLANNED |
@@ -52,7 +52,7 @@
 | P3P18 | Data Robustness & Reproducibility | ⏳ PLANNED |
 | P3P19 | Results, Reporting & Export | ⏳ PLANNED |
 
-**Rule:** P3P11–P3P19 are backlog items, not completed work.
+**Rule:** Treat each patch according to its recorded status above. P3P11 still needs explicit confirmation of nonzero-cost and persistence behavior; P3P12 CSV export is complete.
 
 ---
 
@@ -64,8 +64,8 @@
 |---|---|---|
 | ASI-1 | Intelligence Foundation | ✅ COMPLETE |
 | ASI-2 | Automatic Strategy Discovery | ✅ COMPLETE |
-| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5, ASI-3.6 VERIFIED; ASI-3.7 INTEGRATION TEST PASSED |
-| ASI-4 | Opportunity Detection | 🟡 ACTIVE — ASI-4.1 VERIFIED; FUTURE ASI-4 WORK NOT STARTED |
+| ASI-3 | Pattern & Price-Action Intelligence | 🟡 ACTIVE — ASI-3.5/3.6 complete; ASI-3.7 pipeline integration/device checkpoint reported passed; later ASI-3 scope remains to be reconciled |
+| ASI-4 | Opportunity Detection | 🟡 ACTIVE — ASI-4.1 through ASI-4.9 implemented; focused/full JVM tests passed; manual Android smoke test passed |
 | ASI-5 | Entry Intelligence | ⏳ FUTURE |
 | ASI-6 | Exit Intelligence | ⏳ FUTURE |
 | ASI-7 | Confidence & Evidence Engine | ⏳ FUTURE |
@@ -296,53 +296,66 @@ The next ASI sub-milestone has not yet been selected. Reconcile the existing
 ASI roadmap/backlog before naming or implementing the next milestone.
 
 
-## ASI-4.1 — Opportunity Registry & Deduplication
+## ASI-4 — Opportunity Detection
 
-**Status: ✅ VERIFIED — FOCUSED TESTS, GITHUB RELEASE BUILD, INSTALLATION, LAUNCH AND PLAY PROTECT PASSED**
+**Status: 🟡 ACTIVE — ASI-4.1 THROUGH ASI-4.9 CHECKPOINTED**
 
-Source checkpoint:
-- Commit: `179f3e10a04fbcc3659bb215c19b95ee766f4d7e`
-- Message: `ASI-4.1 add opportunity registry and deduplication`
+ASI-4 is the deterministic opportunity-detection foundation. These milestones
+do not introduce automatic entry decisions, live order execution, or broker
+integration.
 
-Implementation:
-- Added `OpportunityRegistry.kt` in `core/intelligence`.
-- Registers fully evaluated setup-opportunity candidates through the existing
-  `SetupOpportunityComposer`.
-- Deduplicates repeated occurrences while distinguishing strategy versions,
-  instruments, timeframes, and separate breakout occurrences.
-- Rejects stale evaluations within the corresponding strategy/instrument/
-  timeframe stream.
-- Does not replace the existing opportunity lifecycle state machine.
-- Does not add order execution, broker integration, notifications, or automatic
-  entry decisions.
-- Registry is in-memory; persistent storage and production orchestration are
-  not established by this milestone.
+| Stage | Scope | Status / evidence |
+|---|---|---|
+| ASI-4.1 | Opportunity registry and deduplication | ✅ COMPLETE — commit `179f3e10a04fbcc3659bb215c19b95ee766f4d7e`; focused tests, release workflow #115, installation, launch and Play Protect recorded as passed |
+| ASI-4.2 | ASI-3.7 pipeline integration / device test | ✅ COMPLETE — source commit `3af79bf`; milestone completion confirmed |
+| ASI-4.3 | Deterministic opportunity orchestrator | ✅ COMPLETE — commit `628faede68c953a6399bc403a85b585a7cd12b9` |
+| ASI-4.4 | Validated opportunity lifecycle management | ✅ COMPLETE — commit `e04d47db592c3b69691885412a89fd4311b2e2f9` |
+| ASI-4.5 | Atomic opportunity reassessment | ✅ COMPLETE — commit `542ca846f16ec4d5e4f5a459ec3d0b2ef8cbf963` |
+| ASI-4.6 | Opportunity supersession and deduplication | ✅ COMPLETE — commit `750bbe0b677fc5e33eeb97c8cc9c5f5c8648523f`; focused registry/composer tests passed |
+| ASI-4.7 | Deterministic opportunity queries | ✅ COMPLETE — commit `5ce0dd2379b3484401d45bdd9069a6978deecb8a` |
+| ASI-4.8 | Deterministic transition history | ✅ COMPLETE — commit `afe5d5209cf74638b5b0e2660374c901c6548691` |
+| ASI-4.9 | Deterministic opportunity query ordering | ✅ COMPLETE — commit `7edafe333875015995b146ae6e1f054a142b2a0f`; focused and full JVM tests passed |
 
-Verification recorded:
-- Focused opportunity, composer, confidence, evidence, and setup-context tests:
-  `BUILD SUCCESSFUL`.
-- Registry compilation: passed.
-- Local Android debug APK build: `BUILD SUCCESSFUL`.
-- Local APK SHA-256:
-  `130ef4c4104d70b8a52f4817b06d17fa93f415f958d8108a788179f4ee63c109`.
-- GitHub Actions Android Release run #115 completed successfully for source
-  commit `179f3e10a04fbcc3659bb215c19b95ee766f4d7e`.
-- Signed APK build and artifact upload: passed.
-- Artifact: `AlgoTrader-release`, ZIP size 4,256,899 bytes.
-- Artifact ZIP SHA-256:
-  `0c8905d200cd22e8eae4fc781533e6457631d44754114744d0f46f8745cc8a38`.
-- User-confirmed installation of the GitHub Actions APK: passed.
-- Physical-device app launch: passed.
-- Google Play Protect: allowed installation.
-- Installed APK SHA-256:
-  `e56c22052f98a267dfc14cd030a12d0def23bb488eed28031705093e477e5b93`.
-- The installed APK hash is recorded as reported from the device's Downloads
-  directory; it is distinct from the artifact ZIP digest.
+### ASI-4.9 implementation and regression test
 
-ASI-4.1 is a registry/deduplication foundation, not completion of all ASI-4
-opportunity-detection capabilities.
+The query comparator uses the opportunity side name as a final tie-breaker
+after the existing query sort keys and opportunity ID. A regression test
+submits the same LONG/SHORT opportunities to two registries in opposite
+insertion orders and confirms identical query results when prior sort keys tie.
 
----
+Recorded verification:
+- Focused command:
+  `./gradlew :core:intelligence:test --tests 'com.algotrader.intelligence.opportunity.SetupOpportunityComposerTest'` — passed.
+- Full command: `./gradlew test` — `BUILD SUCCESSFUL`; 74 actionable tasks (10 executed, 64 up-to-date).
+- `git diff --check` and staged patch checks passed before the source commit.
+- The ASI-4.9 commit changed exactly these two files:
+  - `core/intelligence/src/main/kotlin/com/algotrader/intelligence/opportunity/OpportunityRegistry.kt`
+  - `core/intelligence/src/test/kotlin/com/algotrader/intelligence/opportunity/SetupOpportunityComposerTest.kt`
+- GitHub `main` and `origin/main` were verified at `7edafe333875015995b146ae6e1f054a142b2a0f`.
+
+### Manual Android smoke test — user-confirmed
+
+The user installed an APK and reported all five checks passing:
+
+| Check | Result |
+|---|---|
+| App launches | ✅ PASS |
+| Home, Market Data, Strategies, Execution and Backtest screens open | ✅ PASS |
+| Market data loads | ✅ PASS |
+| Strategy and Backtest functionality | ✅ PASS |
+| Google Play Protect / security check | ✅ PASS — no warning encountered |
+
+This is a user-reported manual smoke test. The exact installed APK source
+commit, APK digest, and associated Android Release workflow run have not been
+independently established. These checks alone do not prove every background,
+backend, or broker integration scenario.
+
+### ASI-4 boundaries
+
+ASI-4 provides registry, orchestration, lifecycle, reassessment, supersession,
+query and deterministic ordering foundations. Persistent production opportunity
+storage, automatic entries, order execution and broker integration are not
+established by these milestones unless separately implemented and verified.
 
 ## ASI-3.7 — Pipeline Integration Coverage
 
@@ -376,15 +389,15 @@ them. Review the existing backlog before selecting the next ASI milestone.
 
 **GitHub `main`:**
 
-`9b5c3ec docs: update roadmap for ASI-4.1`
+`7edafe333875015995b146ae6e1f054a142b2a0f` — `ASI-4.9 deterministic opportunity query ordering`.
 
-Fresh GitHub clone was previously verified and built successfully.
+The source commit and remote `main` were verified synchronized. Focused ASI-4.9 tests and the full `./gradlew test` suite passed. The Android smoke-test results are user-reported; the exact installed APK-to-commit mapping remains unverified.
 
-Debug APK:
+Historical debug APK path:
 
 `app/build/outputs/apk/debug/app-debug.apk`
 
-Verified GitHub-build SHA-256:
+Historical GitHub-build SHA-256 from an earlier checkpoint (not the current ASI-4.9 installed APK):
 
 `305cf07fcd1edbed18e6eb019a0cb4da98a7c20d275d9e57919acf7baafc5772`
 
@@ -429,36 +442,34 @@ Normal Android APK installation through the device/Downloads workflow remains th
 
 ## Immediate target
 
-**ASI-4.1 verification complete. Stop here; ASI-4.2 is not started.**
+**Preserve the ASI-4.1–ASI-4.9 checkpoint and continue verification from this baseline.**
 
-1. ASI-4.1 focused tests and local build passed.
-2. GitHub Actions Android Release run #115 succeeded for source commit
-   `179f3e10a04fbcc3659bb215c19b95ee766f4d7e`.
-3. The user confirmed installing the GitHub Actions APK, successful launch,
-   and Play Protect allowing installation.
-4. CI artifact ZIP digest and installed APK SHA-256 are recorded above.
-5. Do not begin ASI-4.2 as part of this checkpoint.
-6. Preserve P3P11–P3P19 as planned backlog items until individually
-   implemented and verified.
-
----
+1. ASI-4.1 through ASI-4.9 are implemented and checkpointed on GitHub `main`.
+2. ASI-4.9 focused tests and full `./gradlew test` passed.
+3. User-reported Android smoke checks 1–5 passed: launch, navigation, market data, strategies/backtest, and Play Protect.
+4. Exact installed APK provenance and the associated Android Release workflow result still need independent confirmation before recording release-artifact verification as commit-specific.
+5. P3P11 still needs explicit confirmation of nonzero transaction-cost calculations and persistence behavior.
+6. P3P12 CSV export is complete; CSV download was confirmed.
+7. Do not repeat ASI-2 validation unless a regression is identified.
+8. Preserve unconfirmed ASI-3.8/ASI-3.9 scope as unresolved; reconcile the roadmap before naming new milestones.
+9. Keep live execution and broker integration out of scope unless explicitly planned and separately verified.
 
 # 11. Reference Status
 
 This document is the canonical project progress/status reference.
 
 When future work changes project state:
-
 - update this document,
 - verify the change,
 - commit it to GitHub,
-- and keep the status aligned with the actual tested source.
+- and keep the status aligned with tested source and user-reported device evidence.
 
 **Current project position:**
 
-`Phase 3 → ASI-4 → ASI-4.1 registry implemented, tested, CI-built,
-installed from GitHub Actions, and device-verified.`
+`Phase 3 → ASI-4 → ASI-4.1 through ASI-4.9 implemented and committed; ASI-4.9 focused/full JVM tests passed; manual Android smoke checks 1–5 reported passing.`
 
-**Current documentation Git checkpoint:**
+**Current source checkpoint:**
 
-`179f3e1` — ASI-4.1 source checkpoint; `9b5c3ec` — roadmap update; final verification record to be committed.
+`7edafe333875015995b146ae6e1f054a142b2a0f` — `ASI-4.9 deterministic opportunity query ordering`.
+
+**Remaining explicit verification items:** P3P11 nonzero-cost/persistence behavior and exact installed APK / release-workflow provenance for the recent manual Android smoke test.
