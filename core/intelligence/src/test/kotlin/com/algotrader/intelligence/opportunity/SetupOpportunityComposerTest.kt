@@ -1023,6 +1023,307 @@ class SetupOpportunityComposerTest {
         assertEquals(opportunity, registry.snapshot().single())
     }
 
+    @Test
+    fun `supersession cancels predecessor and preserves successor`() {
+        val registry = OpportunityRegistry()
+        val later = t0.plusSeconds(10)
+
+        val predecessorResult = registry.submit(candidate())
+        val successorResult = registry.submit(
+            candidate(
+                setup = setup(BreakoutDirection.DOWN),
+                evaluatedAt = later
+            )
+        )
+
+        assertTrue(
+            predecessorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+        assertTrue(
+            successorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+
+        val predecessor = (
+            (predecessorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+        val successor = (
+            (successorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val at = later.plusSeconds(1)
+        val result = registry.supersedeRegistered(
+            predecessorId = predecessor.id,
+            successorId = successor.id,
+            at = at,
+            reason = "newer setup detected"
+        )
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Applied)
+        val cancelled = (
+            result as com.algotrader.intelligence.common.TransitionResult.Applied
+            ).value
+
+        assertEquals(OpportunityState.CANCELLED, cancelled.state)
+        assertEquals(CancellationReason.SUPERSEDED, cancelled.cancellation?.reason)
+        assertTrue(cancelled.cancellation?.detail?.contains(successor.id.value) == true)
+        assertEquals(at, cancelled.updatedAt)
+        assertEquals(successor, registry.snapshot().single { it.id == successor.id })
+        assertEquals(2, registry.size())
+    }
+
+    @Test
+    fun `supersession rejects different instruments without mutation`() {
+        val registry = OpportunityRegistry()
+        val later = t0.plusSeconds(10)
+        val otherInstrument = instrument.copy(
+            instrument = Instrument("BANKNIFTY26JANFUT", "NSE"),
+            underlying = "BANKNIFTY",
+            contractId = "BANKNIFTY26JANFUT"
+        )
+
+        val predecessorResult = registry.submit(candidate())
+        val successorResult = registry.submit(
+            candidate(
+                setup = setup(BreakoutDirection.DOWN),
+                targetInstrument = otherInstrument,
+                evaluatedAt = later
+            )
+        )
+
+        assertTrue(
+            predecessorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+        assertTrue(
+            successorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+
+        val predecessor = (
+            (predecessorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+        val successor = (
+            (successorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val before = registry.snapshot()
+        val result = registry.supersedeRegistered(
+            predecessor.id,
+            successor.id,
+            later.plusSeconds(1),
+            "instrument mismatch"
+        )
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(before, registry.snapshot())
+    }
+
+    @Test
+    fun `supersession rejects different timeframes without mutation`() {
+        val registry = OpportunityRegistry()
+        val later = t0.plusSeconds(10)
+
+        val predecessorResult = registry.submit(candidate())
+        val successorResult = registry.submit(
+            candidate(
+                setup = setup(BreakoutDirection.DOWN),
+                targetTimeframe = Timeframe.MINUTE_30,
+                evaluatedAt = later
+            )
+        )
+
+        assertTrue(
+            predecessorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+        assertTrue(
+            successorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+
+        val predecessor = (
+            (predecessorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+        val successor = (
+            (successorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val before = registry.snapshot()
+        val result = registry.supersedeRegistered(
+            predecessor.id,
+            successor.id,
+            later.plusSeconds(1),
+            "timeframe mismatch"
+        )
+
+        assertTrue(
+            result is com.algotrader.intelligence.common.TransitionResult.Rejected
+        )
+        assertEquals(before, registry.snapshot())
+    }
+
+    @Test
+    fun `supersession rejects a confirmed predecessor without mutation`() {
+        val registry = OpportunityRegistry()
+        val later = t0.plusSeconds(10)
+
+        val predecessorResult = registry.submit(candidate())
+        val successorResult = registry.submit(
+            candidate(
+                setup = setup(BreakoutDirection.DOWN),
+                evaluatedAt = later
+            )
+        )
+
+        assertTrue(
+            predecessorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+        assertTrue(
+            successorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+
+        val predecessor = (
+            (predecessorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+        val successor = (
+            (successorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val progression = listOf(
+            OpportunityState.ALERTED,
+            OpportunityState.WAITING_FOR_ENTRY,
+            OpportunityState.ENTRY_CONDITIONS_MET,
+            OpportunityState.ENTRY_CONFIRMED
+        )
+
+        progression.forEachIndexed { index, state ->
+            val result = registry.updateRegistered(predecessor.id) { current ->
+                current.advanceTo(
+                    state,
+                    t0.plusSeconds(index.toLong() + 1),
+                    "prepare confirmed-entry regression"
+                )
+            }
+            assertTrue(
+                result is com.algotrader.intelligence.common.TransitionResult.Applied,
+                "Expected predecessor to advance to $state, got $result"
+            )
+        }
+
+        val before = registry.snapshot()
+        val result = registry.supersedeRegistered(
+            predecessor.id,
+            successor.id,
+            later.plusSeconds(1),
+            "predecessor entry already confirmed"
+        )
+
+        assertTrue(
+            result is com.algotrader.intelligence.common.TransitionResult.Rejected
+        )
+        assertEquals(before, registry.snapshot())
+        assertEquals(
+            OpportunityState.ENTRY_CONFIRMED,
+            registry.snapshot().single { it.id == predecessor.id }.state
+        )
+        assertEquals(
+            successor,
+            registry.snapshot().single { it.id == successor.id }
+        )
+    }
+
+    @Test
+    fun `supersession rejects a successor that is not newer`() {
+        val registry = OpportunityRegistry()
+
+        val predecessorResult = registry.submit(candidate())
+        val successorResult = registry.submit(
+            candidate(setup = setup(BreakoutDirection.DOWN))
+        )
+
+        assertTrue(
+            predecessorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+        assertTrue(
+            successorResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+
+        val predecessor = (
+            (predecessorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+        val successor = (
+            (successorResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val before = registry.snapshot()
+        val result = registry.supersedeRegistered(
+            predecessor.id,
+            successor.id,
+            t0.plusSeconds(1),
+            "same-time setup"
+        )
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(before, registry.snapshot())
+    }
+
+    @Test
+    fun `supersession rejects missing and ambiguous opportunity ids`() {
+        val registry = OpportunityRegistry()
+        val original = setup(BreakoutDirection.UP)
+        val laterAt = t0.plusSeconds(60)
+        val laterOccurrence = original.copy(
+            breakout = original.breakout.copy(
+                breakAt = laterAt,
+                confirmedAt = laterAt
+            )
+        )
+
+        val first = registry.submit(candidate(setup = original))
+        val second = registry.submit(
+            candidate(setup = laterOccurrence, evaluatedAt = laterAt)
+        )
+        val successor = registry.submit(
+            candidate(
+                setup = setup(BreakoutDirection.DOWN),
+                evaluatedAt = laterAt.plusSeconds(10)
+            )
+        )
+
+        assertTrue(first is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(second is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(successor is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val successorOpportunity = (
+            (successor as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val before = registry.snapshot()
+        val ambiguous = registry.supersedeRegistered(
+            OpportunityId("test-strategy@3#UP:105.0:a1"),
+            successorOpportunity.id,
+            laterAt.plusSeconds(20),
+            "ambiguous predecessor"
+        )
+        val missing = registry.supersedeRegistered(
+            OpportunityId("missing-opportunity"),
+            successorOpportunity.id,
+            laterAt.plusSeconds(20),
+            "missing predecessor"
+        )
+
+        assertTrue(ambiguous is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertTrue(missing is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(before, registry.snapshot())
+    }
+
     // ASI-4.1 registry regression tests
 
     private fun candidate(

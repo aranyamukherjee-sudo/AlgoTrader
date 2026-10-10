@@ -157,6 +157,113 @@ class OpportunityRegistry {
     }
 
     /**
+     * Supersede one registered opportunity with a newer opportunity for the
+     * same instrument and timeframe.
+     *
+     * Strategy versions may differ. The successor remains unchanged; the
+     * predecessor is cancelled through the domain model with SUPERSEDED.
+     * Validation and mutation run under the registry lock, so rejected
+     * operations leave the registry unchanged.
+     */
+    fun supersedeRegistered(
+        predecessorId: OpportunityId,
+        successorId: OpportunityId,
+        at: Instant,
+        reason: String
+    ): TransitionResult<Opportunity> = synchronized(lock) {
+        if (predecessorId == successorId) {
+            return@synchronized TransitionResult.Rejected(
+                "an opportunity cannot supersede itself"
+            )
+        }
+
+        if (reason.isBlank()) {
+            return@synchronized TransitionResult.Rejected(
+                "a supersession reason is required"
+            )
+        }
+
+        val predecessorMatches =
+            opportunities.entries.filter { it.value.id == predecessorId }
+
+        if (predecessorMatches.isEmpty()) {
+            return@synchronized TransitionResult.Rejected(
+                "predecessor ${predecessorId.value} is not registered"
+            )
+        }
+        if (predecessorMatches.size != 1) {
+            return@synchronized TransitionResult.Rejected(
+                "predecessor id ${predecessorId.value} is ambiguous in the registry"
+            )
+        }
+
+        val successorMatches =
+            opportunities.entries.filter { it.value.id == successorId }
+
+        if (successorMatches.isEmpty()) {
+            return@synchronized TransitionResult.Rejected(
+                "successor ${successorId.value} is not registered"
+            )
+        }
+        if (successorMatches.size != 1) {
+            return@synchronized TransitionResult.Rejected(
+                "successor id ${successorId.value} is ambiguous in the registry"
+            )
+        }
+
+        val predecessor = predecessorMatches.single().value
+        val successor = successorMatches.single().value
+
+        if (predecessor.instrument != successor.instrument) {
+            return@synchronized TransitionResult.Rejected(
+                "supersession requires the same instrument"
+            )
+        }
+        if (predecessor.timeframe != successor.timeframe) {
+            return@synchronized TransitionResult.Rejected(
+                "supersession requires the same timeframe"
+            )
+        }
+        if (!successor.detectedAt.isAfter(predecessor.detectedAt)) {
+            return@synchronized TransitionResult.Rejected(
+                "successor must be detected after the predecessor"
+            )
+        }
+        if (at.isBefore(predecessor.updatedAt)) {
+            return@synchronized TransitionResult.Rejected(
+                "supersession time is before the predecessor update"
+            )
+        }
+        if (at.isBefore(successor.updatedAt)) {
+            return@synchronized TransitionResult.Rejected(
+                "supersession time is before the successor update"
+            )
+        }
+        if (successor.state.isTerminal) {
+            return@synchronized TransitionResult.Rejected(
+                "a terminal opportunity cannot supersede another opportunity"
+            )
+        }
+        if (!predecessor.state.canCancelOrExpire) {
+            return@synchronized TransitionResult.Rejected(
+                "predecessor cannot be superseded after entry confirmation"
+            )
+        }
+
+        val detail = "Superseded by ${successor.id.value}: $reason"
+
+        // updateRegistered is synchronized on the same reentrant JVM monitor.
+        // All cross-opportunity checks have passed before the sole mutation.
+        updateRegistered(predecessorId) { current ->
+            current.cancel(
+                reason = CancellationReason.SUPERSEDED,
+                detail = detail,
+                at = at
+            )
+        }
+    }
+
+    /**
      * Apply a validated lifecycle operation to one registered opportunity.
      *
      * The transform must use the Opportunity domain methods (advanceTo,
