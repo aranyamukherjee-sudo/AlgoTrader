@@ -53,6 +53,23 @@ object BacktestCostPresentation {
         result.metrics.netProfit
     }
 
+    /**
+     * P3P15: rank by the selected P&L metric, using strategy name to resolve
+     * exact ties deterministically. This does not introduce a composite score.
+     */
+    fun rankResults(
+        results: List<BacktestResult>,
+        useCostAdjusted: Boolean
+    ): List<BacktestResult> = results.sortedWith(
+        compareByDescending<BacktestResult> {
+            comparisonPnl(it, useCostAdjusted)
+        }.thenBy {
+            it.strategyName.trim().lowercase(java.util.Locale.ROOT)
+        }.thenBy {
+            it.strategyName
+        }
+    )
+
     /** Setup-screen explanation, shown whether or not costs are entered. */
     const val SETUP_CAPTION =
         "Generic assumptions for research only \u2014 not your broker's charges and " +

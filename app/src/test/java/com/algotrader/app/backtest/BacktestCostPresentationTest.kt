@@ -22,16 +22,19 @@ class BacktestCostPresentationTest {
         model: ResearchCostModel,
         researchCosts: Double = 0.0,
         costAdjustedNet: Double = 100.0,
-        costAdjustedReturn: Double = 0.1
+        costAdjustedReturn: Double = 0.1,
+        strategyName: String = "t",
+        grossPnl: Double = 100.0
     ) = BacktestResult(
-        strategyName = "t",
+        strategyName = strategyName,
         config = BacktestConfig(researchCostModel = model),
-        finalEquity = 100_100.0,
+        finalEquity = 100_000.0 + grossPnl,
         trades = emptyList(),
         equityCurve = emptyList(),
         metrics = PerformanceMetrics(
             totalTrades = 1, winningTrades = 1, losingTrades = 0, winRate = 1.0,
-            grossProfit = 100.0, grossLoss = 0.0, netProfit = 100.0, totalReturnPercent = 0.1,
+            grossProfit = maxOf(0.0, grossPnl), grossLoss = minOf(0.0, grossPnl),
+            netProfit = grossPnl, totalReturnPercent = grossPnl / 100_000.0 * 100.0,
             researchCosts = researchCosts,
             costAdjustedNetProfit = costAdjustedNet,
             costAdjustedReturnPercent = costAdjustedReturn,
@@ -92,6 +95,67 @@ class BacktestCostPresentationTest {
         assertEquals(
             "Cost assumptions differ; ranked by P&L before costs.",
             BacktestCostPresentation.comparisonCaption(listOf(a, b))
+        )
+    }
+
+    // ---- P3P15: deterministic strategy ranking ----
+
+    @Test
+    fun rankingOrdersBySelectedPnlDescending() {
+        val lower = result(
+            ResearchCostModel(), strategyName = "Lower", grossPnl = 50.0
+        )
+        val higher = result(
+            ResearchCostModel(), strategyName = "Higher", grossPnl = 200.0
+        )
+        val middle = result(
+            ResearchCostModel(), strategyName = "Middle", grossPnl = 100.0
+        )
+
+        assertEquals(
+            listOf("Higher", "Middle", "Lower"),
+            BacktestCostPresentation.rankResults(
+                listOf(lower, higher, middle), useCostAdjusted = false
+            ).map { it.strategyName }
+        )
+    }
+
+    @Test
+    fun rankingUsesCostAdjustedPnlWhenRequested() {
+        val higherGross = result(
+            costed, strategyName = "Higher gross", grossPnl = 200.0,
+            costAdjustedNet = 10.0
+        )
+        val higherAfterCosts = result(
+            costed, strategyName = "Higher after costs", grossPnl = 100.0,
+            costAdjustedNet = 50.0
+        )
+
+        assertEquals(
+            listOf("Higher after costs", "Higher gross"),
+            BacktestCostPresentation.rankResults(
+                listOf(higherGross, higherAfterCosts), useCostAdjusted = true
+            ).map { it.strategyName }
+        )
+    }
+
+    @Test
+    fun rankingResolvesEqualPnlByCaseInsensitiveStrategyName() {
+        val zulu = result(
+            ResearchCostModel(), strategyName = "Zulu", grossPnl = 100.0
+        )
+        val beta = result(
+            ResearchCostModel(), strategyName = "Beta", grossPnl = 100.0
+        )
+        val alpha = result(
+            ResearchCostModel(), strategyName = "alpha", grossPnl = 100.0
+        )
+
+        assertEquals(
+            listOf("alpha", "Beta", "Zulu"),
+            BacktestCostPresentation.rankResults(
+                listOf(zulu, beta, alpha), useCostAdjusted = false
+            ).map { it.strategyName }
         )
     }
 

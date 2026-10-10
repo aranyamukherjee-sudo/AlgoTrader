@@ -271,9 +271,8 @@ internal object BacktestResultsScreen {
 
         val useCostAdjusted =
             BacktestCostPresentation.usesCostAdjustedComparison(results)
-        val ranked = results.sortedByDescending {
-            BacktestCostPresentation.comparisonPnl(it, useCostAdjusted)
-        }
+        val ranked =
+            BacktestCostPresentation.rankResults(results, useCostAdjusted)
         val maxAbs = max(
             1.0,
             ranked.maxOf {
