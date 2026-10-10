@@ -543,6 +543,68 @@ class OpportunityRegistry {
                 .toList()
         }
 
+    /**
+     * Return recorded state transitions in deterministic chronological order.
+     *
+     * Filtering and copying occur under the registry lock. The method is
+     * read-only and includes transitions from terminal opportunities.
+     * Reassessments and execution updates are not state transitions and are
+     * therefore not represented in this result.
+     */
+    fun transitionHistory(
+        filter: OpportunityTransitionQuery = OpportunityTransitionQuery()
+    ): List<OpportunityTransitionRecord> = synchronized(lock) {
+        opportunities.values
+            .asSequence()
+            .filter { opportunity ->
+                filter.id == null || opportunity.id == filter.id
+            }
+            .flatMap { opportunity ->
+                opportunity.transitions
+                    .withIndex()
+                    .asSequence()
+                    .map { indexed ->
+                        OpportunityTransitionRecord(
+                            opportunityId = opportunity.id,
+                            strategy = opportunity.strategy,
+                            instrument = opportunity.instrument,
+                            timeframe = opportunity.timeframe,
+                            side = opportunity.side,
+                            detectedAt = opportunity.detectedAt,
+                            transitionIndex = indexed.index,
+                            transition = indexed.value
+                        )
+                    }
+            }
+            .filter { record ->
+                (filter.fromInclusive == null ||
+                    !record.transition.at.isBefore(filter.fromInclusive)) &&
+                    (filter.untilExclusive == null ||
+                        record.transition.at.isBefore(filter.untilExclusive))
+            }
+            .sortedWith(
+                compareBy<OpportunityTransitionRecord> { it.transition.at }
+                    .thenBy { it.detectedAt }
+                    .thenBy { it.opportunityId.value }
+                    .thenBy { it.strategy.id.value }
+                    .thenBy { it.strategy.version }
+                    .thenBy { it.instrument.instrument.exchange }
+                    .thenBy { it.instrument.instrument.symbol }
+                    .thenBy { it.instrument.instrument.currency }
+                    .thenBy { it.instrument.kind.name }
+                    .thenBy { it.instrument.underlying.orEmpty() }
+                    .thenBy { it.instrument.contractId.orEmpty() }
+                    .thenBy { it.timeframe.ordinal }
+                    .thenBy { it.side.name }
+                    .thenBy { it.transitionIndex }
+                    .thenBy { it.transition.from?.name.orEmpty() }
+                    .thenBy { it.transition.to.name }
+                    .thenBy { it.transition.reason }
+                    .thenBy { it.transition.confidence ?: -1.0 }
+            )
+            .toList()
+    }
+
     /** Return all non-terminal registered opportunities in deterministic order. */
     fun activeSnapshot(): List<Opportunity> =
         query(OpportunityQuery(includeTerminal = false))

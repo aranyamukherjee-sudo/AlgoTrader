@@ -1420,6 +1420,159 @@ class SetupOpportunityComposerTest {
         assertEquals(before, registry.snapshot())
     }
 
+    // ASI-4.8 deterministic transition-history query tests
+
+    @Test
+    fun `transition history returns every occurrence for an ambiguous id`() {
+        val registry = OpportunityRegistry()
+        val original = setup(BreakoutDirection.UP)
+        val createdResult = registry.submit(candidate(setup = original))
+        assertTrue(createdResult is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val created = (
+            (createdResult as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val advanced = registry.updateRegistered(created.id) {
+            it.advanceTo(
+                OpportunityState.ALERTED,
+                t0.plusSeconds(10),
+                "history test alert"
+            )
+        }
+        assertTrue(advanced is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val laterAt = t0.plusSeconds(60)
+        val laterOccurrence = original.copy(
+            breakout = original.breakout.copy(
+                breakAt = laterAt,
+                confirmedAt = laterAt
+            )
+        )
+        val second = registry.submit(
+            candidate(setup = laterOccurrence, evaluatedAt = laterAt)
+        )
+        assertTrue(second is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val history = registry.transitionHistory(
+            OpportunityTransitionQuery(
+                id = OpportunityId("test-strategy@3#UP:105.0:a1")
+            )
+        )
+
+        assertEquals(3, history.size)
+        assertEquals(
+            listOf(
+                OpportunityState.OPPORTUNITY_FOUND,
+                OpportunityState.ALERTED,
+                OpportunityState.OPPORTUNITY_FOUND
+            ),
+            history.map { it.transition.to }
+        )
+        assertEquals(
+            listOf(t0, t0.plusSeconds(10), laterAt),
+            history.map { it.transition.at }
+        )
+        assertEquals(listOf(0, 1, 0), history.map { it.transitionIndex })
+    }
+
+    @Test
+    fun `transition history applies inclusive lower and exclusive upper boundaries`() {
+        val registry = OpportunityRegistry()
+        val submitted = registry.submit(candidate())
+        assertTrue(submitted is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val opportunity = (
+            (submitted as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val advanced = registry.updateRegistered(opportunity.id) {
+            it.advanceTo(
+                OpportunityState.ALERTED,
+                t0.plusSeconds(10),
+                "boundary test alert"
+            )
+        }
+        assertTrue(advanced is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val history = registry.transitionHistory(
+            OpportunityTransitionQuery(
+                fromInclusive = t0,
+                untilExclusive = t0.plusSeconds(10)
+            )
+        )
+
+        assertEquals(1, history.size)
+        assertEquals(t0, history.single().transition.at)
+    }
+
+    @Test
+    fun `transition history ordering is deterministic regardless of submission order`() {
+        val up = candidate(setup = setup(BreakoutDirection.UP))
+        val down = candidate(setup = setup(BreakoutDirection.DOWN))
+
+        val firstRegistry = OpportunityRegistry()
+        assertTrue(firstRegistry.submit(up) is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(firstRegistry.submit(down) is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val secondRegistry = OpportunityRegistry()
+        assertTrue(secondRegistry.submit(down) is com.algotrader.intelligence.common.TransitionResult.Applied)
+        assertTrue(secondRegistry.submit(up) is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        assertEquals(
+            firstRegistry.transitionHistory(),
+            secondRegistry.transitionHistory()
+        )
+    }
+
+    @Test
+    fun `transition history rejects an empty or reversed time range`() {
+        assertFailsWith<IllegalArgumentException> {
+            OpportunityTransitionQuery(
+                fromInclusive = t0,
+                untilExclusive = t0
+            )
+        }
+
+        assertFailsWith<IllegalArgumentException> {
+            OpportunityTransitionQuery(
+                fromInclusive = t0.plusSeconds(1),
+                untilExclusive = t0
+            )
+        }
+    }
+
+    @Test
+    fun `transition history includes terminal opportunities and does not mutate registry`() {
+        val registry = OpportunityRegistry()
+        val submitted = registry.submit(candidate())
+        assertTrue(submitted is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val opportunity = (
+            (submitted as com.algotrader.intelligence.common.TransitionResult.Applied)
+                .value as OpportunityRegistration.Created
+            ).opportunity
+
+        val cancelled = registry.updateRegistered(opportunity.id) {
+            it.cancel(
+                CancellationReason.CONDITIONS_WEAKENED,
+                "history terminal-state test",
+                t0.plusSeconds(5)
+            )
+        }
+        assertTrue(cancelled is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val before = registry.snapshot()
+        val history = registry.transitionHistory()
+
+        assertEquals(2, history.size)
+        assertEquals(OpportunityState.CANCELLED, history.last().transition.to)
+        assertEquals(before, registry.snapshot())
+        assertEquals(1, registry.size())
+    }
+
     // ASI-4.1 registry regression tests
 
     private fun candidate(
