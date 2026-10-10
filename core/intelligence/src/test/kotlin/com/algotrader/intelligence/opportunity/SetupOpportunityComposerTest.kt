@@ -348,6 +348,586 @@ class SetupOpportunityComposerTest {
         assertEquals(1, orchestrator.size())
     }
 
+    // ASI-4.4 registered lifecycle update tests
+
+    @Test
+    fun `registry retains a successful lifecycle update in its snapshot`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val updatedAt = t0.plusSeconds(1)
+        val result = registry.updateRegistered(opportunity.id) {
+            it.advanceTo(OpportunityState.ALERTED, updatedAt, "alert issued")
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Applied)
+        val updated = (result as com.algotrader.intelligence.common.TransitionResult.Applied).value
+        assertEquals(OpportunityState.ALERTED, updated.state)
+        assertEquals(updatedAt, updated.updatedAt)
+        assertEquals(2, updated.transitions.size)
+        assertEquals(updated, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejection leaves the registered opportunity unchanged`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            it.advanceTo(
+                OpportunityState.ENTRY_CONFIRMED,
+                t0.plusSeconds(1),
+                "invalid entry skip"
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry cancellation is retained and terminal opportunities cannot be changed`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val cancelledResult = registry.updateRegistered(opportunity.id) {
+            it.cancel(
+                CancellationReason.CONDITIONS_WEAKENED,
+                "breakout conditions weakened",
+                t0.plusSeconds(1)
+            )
+        }
+
+        assertTrue(cancelledResult is com.algotrader.intelligence.common.TransitionResult.Applied)
+        val cancelled = (cancelledResult as com.algotrader.intelligence.common.TransitionResult.Applied).value
+        assertEquals(OpportunityState.CANCELLED, cancelled.state)
+        assertEquals(CancellationReason.CONDITIONS_WEAKENED, cancelled.cancellation?.reason)
+        assertEquals(cancelled, registry.snapshot().single())
+
+        val terminalUpdate = registry.updateRegistered(opportunity.id) {
+            it.advanceTo(OpportunityState.ALERTED, t0.plusSeconds(2), "should not reopen")
+        }
+        assertTrue(terminalUpdate is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(cancelled, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry refuses an update that changes opportunity identity`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                it.copy(id = OpportunityId("forged-opportunity-id"))
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects unknown opportunity ids`() {
+        val registry = OpportunityRegistry()
+        val result = registry.updateRegistered(OpportunityId("missing-opportunity")) {
+            it.advanceTo(OpportunityState.ALERTED, t0.plusSeconds(1), "unknown")
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertTrue(registry.snapshot().isEmpty())
+    }
+
+    @Test
+    fun `registry retains reassessment without changing lifecycle state`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            it.reassess(
+                0.55,
+                it.updatedAt.plusSeconds(1),
+                "reassessment updated confidence"
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Applied)
+        val updated =
+            (result as com.algotrader.intelligence.common.TransitionResult.Applied).value
+
+        assertEquals(opportunity.state, updated.state)
+        assertEquals(opportunity.transitions, updated.transitions)
+        assertEquals(
+            opportunity.confidenceHistory.readings.size + 1,
+            updated.confidenceHistory.readings.size
+        )
+        assertEquals(updated, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects reassessment confidence with mismatched update timestamp`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            when (
+                val reassessed = it.reassess(
+                    0.55,
+                    it.updatedAt.plusSeconds(1),
+                    "reassessment updated confidence"
+                )
+            ) {
+                is com.algotrader.intelligence.common.TransitionResult.Applied ->
+                    com.algotrader.intelligence.common.TransitionResult.Applied(
+                        reassessed.value.copy(updatedAt = it.updatedAt)
+                    )
+                is com.algotrader.intelligence.common.TransitionResult.Rejected ->
+                    reassessed
+            }
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry retains valid expiry as a terminal state`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            it.expire("setup expired", it.updatedAt.plusSeconds(1))
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Applied)
+        val expired =
+            (result as com.algotrader.intelligence.common.TransitionResult.Applied).value
+
+        assertEquals(OpportunityState.EXPIRED, expired.state)
+        assertEquals(null, expired.cancellation)
+        assertEquals(expired, registry.snapshot().single())
+
+        val reopened = registry.updateRegistered(opportunity.id) {
+            it.advanceTo(
+                OpportunityState.ALERTED,
+                it.updatedAt.plusSeconds(1),
+                "attempt to reopen expired opportunity"
+            )
+        }
+
+        assertTrue(reopened is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(expired, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry records execution after entry confirmation`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val entryStates = listOf(
+            OpportunityState.ALERTED,
+            OpportunityState.WAITING_FOR_ENTRY,
+            OpportunityState.ENTRY_CONDITIONS_MET,
+            OpportunityState.ENTRY_CONFIRMED
+        )
+
+        for (target in entryStates) {
+            val result = registry.updateRegistered(opportunity.id) {
+                it.advanceTo(
+                    target,
+                    it.updatedAt.plusSeconds(1),
+                    "advance to $target"
+                )
+            }
+            assertTrue(
+                result is com.algotrader.intelligence.common.TransitionResult.Applied,
+                "Expected transition to $target to be accepted"
+            )
+        }
+
+        val beforeExecution = registry.snapshot().single()
+        val result = registry.updateRegistered(opportunity.id) {
+            val executionAt = it.updatedAt.plusSeconds(1)
+            it.recordExecution(
+                com.algotrader.intelligence.opportunity.ExecutionLink.UserActed(
+                    executionAt,
+                    "user acted"
+                ),
+                executionAt
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Applied)
+        val updated =
+            (result as com.algotrader.intelligence.common.TransitionResult.Applied).value
+
+        assertEquals(OpportunityState.ENTRY_CONFIRMED, updated.state)
+        assertEquals(beforeExecution.transitions, updated.transitions)
+        assertTrue(
+            updated.execution is
+                com.algotrader.intelligence.opportunity.ExecutionLink.UserActed
+        )
+        assertEquals(updated, registry.snapshot().single())
+    }
+
+
+    @Test
+    fun `registry advances execution from user action to placed order`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        for (target in listOf(
+            OpportunityState.ALERTED,
+            OpportunityState.WAITING_FOR_ENTRY,
+            OpportunityState.ENTRY_CONDITIONS_MET,
+            OpportunityState.ENTRY_CONFIRMED
+        )) {
+            val result = registry.updateRegistered(opportunity.id) {
+                it.advanceTo(target, it.updatedAt.plusSeconds(1), "advance to $target")
+            }
+            assertTrue(
+                result is com.algotrader.intelligence.common.TransitionResult.Applied,
+                "Expected transition to $target to be accepted"
+            )
+        }
+
+        val acted = registry.updateRegistered(opportunity.id) {
+            val at = it.updatedAt.plusSeconds(1)
+            it.recordExecution(
+                com.algotrader.intelligence.opportunity.ExecutionLink.UserActed(at, "acted"),
+                at
+            )
+        }
+        assertTrue(acted is com.algotrader.intelligence.common.TransitionResult.Applied)
+
+        val beforeOrder = registry.snapshot().single()
+        val orderAt = beforeOrder.updatedAt.plusSeconds(1)
+        val orderResult = registry.updateRegistered(opportunity.id) {
+            it.recordExecution(
+                com.algotrader.intelligence.opportunity.ExecutionLink.OrderPlaced(
+                    "test-order-1",
+                    orderAt
+                ),
+                orderAt
+            )
+        }
+
+        assertTrue(
+            orderResult is com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+        val updated =
+            (orderResult as com.algotrader.intelligence.common.TransitionResult.Applied).value
+        assertEquals(beforeOrder.state, updated.state)
+        assertEquals(beforeOrder.transitions, updated.transitions)
+        assertEquals(
+            com.algotrader.intelligence.opportunity.ExecutionLink.OrderPlaced(
+                "test-order-1",
+                orderAt
+            ),
+            updated.execution
+        )
+        assertEquals(updated, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects execution timestamp after opportunity update`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        for (target in listOf(
+            OpportunityState.ALERTED,
+            OpportunityState.WAITING_FOR_ENTRY,
+            OpportunityState.ENTRY_CONDITIONS_MET,
+            OpportunityState.ENTRY_CONFIRMED
+        )) {
+            val result = registry.updateRegistered(opportunity.id) {
+                it.advanceTo(target, it.updatedAt.plusSeconds(1), "advance to $target")
+            }
+            assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Applied)
+        }
+
+        val before = registry.snapshot().single()
+        val result = registry.updateRegistered(opportunity.id) {
+            val executionAt = it.updatedAt.plusSeconds(2)
+            val link = com.algotrader.intelligence.opportunity.ExecutionLink.UserActed(
+                executionAt,
+                "forged future timestamp"
+            )
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                it.copy(
+                    execution = link,
+                    updatedAt = it.updatedAt.plusSeconds(1)
+                )
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(before, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects expiry after entry confirmation`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        for (target in listOf(
+            OpportunityState.ALERTED,
+            OpportunityState.WAITING_FOR_ENTRY,
+            OpportunityState.ENTRY_CONDITIONS_MET,
+            OpportunityState.ENTRY_CONFIRMED
+        )) {
+            val result = registry.updateRegistered(opportunity.id) {
+                it.advanceTo(target, it.updatedAt.plusSeconds(1), "advance to $target")
+            }
+            assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Applied)
+        }
+
+        val before = registry.snapshot().single()
+        val result = registry.updateRegistered(opportunity.id) {
+            it.expire("expiry after confirmed entry", it.updatedAt.plusSeconds(1))
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(before, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects forged transition history`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            val forgedAt = it.updatedAt.plusSeconds(1)
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                it.copy(
+                    transitions = it.transitions + OpportunityTransition(
+                        from = it.state,
+                        to = it.state,
+                        at = forgedAt,
+                        reason = "forged self-transition",
+                        confidence = null
+                    ),
+                    updatedAt = forgedAt
+                )
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects expiry with a blank transition reason`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            val expired = it.expire(
+                "setup expired",
+                it.updatedAt.plusSeconds(1)
+            ).getOrThrow()
+
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                expired.copy(
+                    transitions = expired.transitions.dropLast(1) +
+                        expired.transitions.last().copy(reason = "")
+                )
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects transition confidence that disagrees with history`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            val advanced = it.advanceTo(
+                OpportunityState.ALERTED,
+                it.updatedAt.plusSeconds(1),
+                "setup alerted",
+                confidence = 0.82
+            ).getOrThrow()
+
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                advanced.copy(
+                    confidenceHistory = advanced.confidenceHistory.copy(
+                        readings = advanced.confidenceHistory.readings.dropLast(1) +
+                            advanced.confidenceHistory.readings.last().copy(value = 0.41)
+                    )
+                )
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects confidence history added to a transition without confidence`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            val advanced = it.advanceTo(
+                OpportunityState.ALERTED,
+                it.updatedAt.plusSeconds(1),
+                "setup alerted"
+            ).getOrThrow()
+
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                advanced.copy(
+                    confidenceHistory = advanced.confidenceHistory.record(
+                        ConfidenceReading(
+                            0.73,
+                            advanced.updatedAt,
+                            "unlinked confidence"
+                        )
+                    )
+                )
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects cancellation metadata inconsistent with transition`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            val cancelled = it.cancel(
+                CancellationReason.CONDITIONS_WEAKENED,
+                "conditions weakened",
+                it.updatedAt.plusSeconds(1)
+            ).getOrThrow()
+
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                cancelled.copy(
+                    cancellation = cancelled.cancellation!!.copy(
+                        detail = "different cancellation detail"
+                    )
+                )
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects multiple confidence readings in one update`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            val firstAt = it.updatedAt.plusSeconds(1)
+            val secondAt = it.updatedAt.plusSeconds(2)
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                it.copy(
+                    confidenceHistory = it.confidenceHistory
+                        .record(ConfidenceReading(0.61, firstAt, "first reading"))
+                        .record(ConfidenceReading(0.67, secondAt, "second reading")),
+                    updatedAt = secondAt
+                )
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
+    @Test
+    fun `registry rejects an update timestamp moving backwards`() {
+        val registry = OpportunityRegistry()
+        val created = registry.submit(candidate())
+        val opportunity = (
+            (created as com.algotrader.intelligence.common.TransitionResult.Applied).value
+                as OpportunityRegistration.Created
+            ).opportunity
+
+        val result = registry.updateRegistered(opportunity.id) {
+            com.algotrader.intelligence.common.TransitionResult.Applied(
+                it.copy(updatedAt = it.updatedAt.minusSeconds(1))
+            )
+        }
+
+        assertTrue(result is com.algotrader.intelligence.common.TransitionResult.Rejected)
+        assertEquals(opportunity, registry.snapshot().single())
+    }
+
     // ASI-4.1 registry regression tests
 
     private fun candidate(

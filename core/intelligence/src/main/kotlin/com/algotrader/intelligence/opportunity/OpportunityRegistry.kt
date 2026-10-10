@@ -134,6 +134,246 @@ class OpportunityRegistry {
         TransitionResult.Applied(OpportunityRegistration.Created(composed))
     }
 
+    /**
+     * Apply a validated lifecycle operation to one registered opportunity.
+     *
+     * The transform must use the Opportunity domain methods (advanceTo,
+     * reassess, cancel, expire, or recordExecution). Rejected operations leave
+     * the registry unchanged. Identity is immutable after registration.
+     */
+    fun updateRegistered(
+        id: OpportunityId,
+        transform: (Opportunity) -> TransitionResult<Opportunity>
+    ): TransitionResult<Opportunity> = synchronized(lock) {
+        val matches = opportunities.entries.filter { it.value.id == id }
+
+        if (matches.isEmpty()) {
+            return@synchronized TransitionResult.Rejected(
+                "opportunity ${id.value} is not registered"
+            )
+        }
+        if (matches.size != 1) {
+            return@synchronized TransitionResult.Rejected(
+                "opportunity id ${id.value} is ambiguous in the registry"
+            )
+        }
+
+        val entry = matches.single()
+        val current = entry.value
+        val result = try {
+            transform(current)
+        } catch (failure: RuntimeException) {
+            return@synchronized TransitionResult.Rejected(
+                "lifecycle operation failed: ${failure.message ?: failure.javaClass.simpleName}"
+            )
+        }
+
+        if (result is TransitionResult.Rejected) {
+            return@synchronized result
+        }
+
+        val updated = (result as TransitionResult.Applied).value
+        if (
+            updated.id != current.id ||
+            updated.strategy != current.strategy ||
+            updated.instrument != current.instrument ||
+            updated.timeframe != current.timeframe ||
+            updated.side != current.side ||
+            updated.detectedAt != current.detectedAt
+        ) {
+            return@synchronized TransitionResult.Rejected(
+                "lifecycle update cannot change registered opportunity identity"
+            )
+        }
+        if (updated.updatedAt.isBefore(current.updatedAt)) {
+            return@synchronized TransitionResult.Rejected(
+                "lifecycle update cannot move time backwards"
+            )
+        }
+
+        val oldTransitions = current.transitions
+        val newTransitions = updated.transitions
+
+        if (newTransitions.size < oldTransitions.size ||
+            newTransitions.take(oldTransitions.size) != oldTransitions
+        ) {
+            return@synchronized TransitionResult.Rejected(
+                "lifecycle update cannot rewrite transition history"
+            )
+        }
+
+        if (updated.state != current.state) {
+            if (newTransitions.size != oldTransitions.size + 1) {
+                return@synchronized TransitionResult.Rejected(
+                    "state change must append exactly one transition"
+                )
+            }
+
+            val transition = newTransitions.last()
+            if (
+                transition.from != current.state ||
+                transition.to != updated.state ||
+                transition.at != updated.updatedAt ||
+                transition.at.isBefore(current.updatedAt)
+            ) {
+                return@synchronized TransitionResult.Rejected(
+                    "state change has an inconsistent transition record"
+                )
+            }
+
+            val legalTransition = when (updated.state) {
+                OpportunityState.CANCELLED -> {
+                    val cancellation = updated.cancellation
+                    current.state.canCancelOrExpire &&
+                        cancellation != null &&
+                        cancellation.stateWhenCancelled == current.state &&
+                        cancellation.at == transition.at &&
+                        cancellation.detail == transition.reason
+                }
+                OpportunityState.EXPIRED ->
+                    current.state.canCancelOrExpire &&
+                        updated.cancellation == null &&
+                        transition.reason.isNotBlank()
+                else ->
+                    OpportunityStateMachine.canTransition(
+                        current.state,
+                        updated.state
+                    ) && updated.cancellation == null
+            }
+
+            if (!legalTransition) {
+                return@synchronized TransitionResult.Rejected(
+                    "lifecycle update violates opportunity state rules"
+                )
+            }
+        } else {
+            if (newTransitions != oldTransitions) {
+                return@synchronized TransitionResult.Rejected(
+                    "non-transition update cannot alter transition history"
+                )
+            }
+            if (updated.cancellation != current.cancellation) {
+                return@synchronized TransitionResult.Rejected(
+                    "non-transition update cannot alter cancellation"
+                )
+            }
+        }
+
+        val oldConfidence = current.confidenceHistory.readings
+        val newConfidence = updated.confidenceHistory.readings
+        if (
+            newConfidence.size < oldConfidence.size ||
+            newConfidence.take(oldConfidence.size) != oldConfidence
+        ) {
+            return@synchronized TransitionResult.Rejected(
+                "lifecycle update cannot rewrite confidence history"
+            )
+        }
+        val addedConfidence = newConfidence.drop(oldConfidence.size)
+        if (addedConfidence.size > 1) {
+            return@synchronized TransitionResult.Rejected(
+                "lifecycle update cannot append multiple confidence readings"
+            )
+        }
+        if (updated.state != current.state) {
+            val transition = newTransitions.last()
+            val reading = addedConfidence.singleOrNull()
+            if (transition.confidence == null) {
+                if (reading != null) {
+                    return@synchronized TransitionResult.Rejected(
+                        "transition without confidence cannot append a confidence reading"
+                    )
+                }
+            } else if (
+                reading == null ||
+                reading.value != transition.confidence ||
+                reading.at != transition.at ||
+                reading.reason != transition.reason
+            ) {
+                return@synchronized TransitionResult.Rejected(
+                    "transition confidence must match its confidence history reading"
+                )
+            }
+        }
+        if (newConfidence.any { it.at.isAfter(updated.updatedAt) }) {
+            return@synchronized TransitionResult.Rejected(
+                "confidence reading cannot be after the opportunity update"
+            )
+        }
+        if (
+            updated.state == current.state &&
+            addedConfidence.isNotEmpty()
+        ) {
+            val reading = addedConfidence.single()
+            if (
+                reading.at != updated.updatedAt ||
+                reading.value != updated.currentConfidence
+            ) {
+                return@synchronized TransitionResult.Rejected(
+                    "reassessment confidence must match the opportunity update"
+                )
+            }
+        }
+        if (addedConfidence.any { it.at.isBefore(current.updatedAt) }) {
+            return@synchronized TransitionResult.Rejected(
+                "confidence history cannot move backwards in time"
+            )
+        }
+
+        val oldEvidence = current.evidence.items
+        val newEvidence = updated.evidence.items
+        if (
+            newEvidence.size < oldEvidence.size ||
+            newEvidence.take(oldEvidence.size) != oldEvidence
+        ) {
+            return@synchronized TransitionResult.Rejected(
+                "lifecycle update cannot rewrite evidence history"
+            )
+        }
+        if (newEvidence.any {
+                it.scope != com.algotrader.intelligence.evidence.EvidenceScope.LIVE ||
+                    it.strategy != current.strategy ||
+                    it.recordedAt.isAfter(updated.updatedAt)
+            }
+        ) {
+            return@synchronized TransitionResult.Rejected(
+                "lifecycle update contains invalid or future evidence"
+            )
+        }
+
+        if (updated.state != current.state && updated.execution != current.execution) {
+            return@synchronized TransitionResult.Rejected(
+                "state transitions cannot alter execution"
+            )
+        }
+
+        if (updated.execution != current.execution) {
+            if (
+                updated.execution.rank <= current.execution.rank ||
+                updated.state.entryState != EntryState.CONFIRMED ||
+                updated.state == OpportunityState.EXIT_CONFIRMED
+            ) {
+                return@synchronized TransitionResult.Rejected(
+                    "execution update violates execution progression rules"
+                )
+            }
+
+            val executionAt = when (val link = updated.execution) {
+                ExecutionLink.None -> null
+                is ExecutionLink.UserActed -> link.at
+                is ExecutionLink.OrderPlaced -> link.at
+            }
+            if (executionAt == null || executionAt.isAfter(updated.updatedAt)) {
+                return@synchronized TransitionResult.Rejected(
+                    "execution timestamp is inconsistent with the opportunity update"
+                )
+            }
+        }
+
+        opportunities[entry.key] = updated
+        TransitionResult.Applied(updated)
+    }
+
     /** Snapshot of registered opportunities in deterministic insertion order. */
     fun snapshot(): List<Opportunity> = synchronized(lock) {
         opportunities.values.toList()
