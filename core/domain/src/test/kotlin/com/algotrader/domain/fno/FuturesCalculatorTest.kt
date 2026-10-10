@@ -666,6 +666,43 @@ class FuturesCalculatorTest {
     }
 
     @Test
+    fun `a schedule for a different exchange is not used`() {
+        val c = FuturesCalculator.calculate(
+            priced(schedule = syntheticSchedule()).copy(
+                exchange = Input.Known("BSE"),
+            ),
+        )
+        assertEquals(ResultKind.NOT_MODELLED, c.netPnl.kind)
+        assertTrue(c.netPnl.warnings.any { "charge schedule is for exchange" in it })
+        assertValue("5200", c.grossPnl)
+    }
+
+    @Test
+    fun `a schedule for a different segment is not used`() {
+        val c = FuturesCalculator.calculate(
+            priced(schedule = syntheticSchedule()).copy(
+                segment = Input.Known("OPTIDX"),
+            ),
+        )
+        assertEquals(ResultKind.NOT_MODELLED, c.netPnl.kind)
+        assertTrue(c.netPnl.warnings.any { "charge schedule is for segment" in it })
+        assertValue("5200", c.grossPnl)
+    }
+
+    @Test
+    fun `schedule identity matching ignores case and surrounding whitespace`() {
+        val c = FuturesCalculator.calculate(
+            priced(schedule = syntheticSchedule()).copy(
+                broker = Input.Known("  TESTBROKER  "),
+                exchange = Input.Known("  nSe "),
+                segment = Input.Known(" futidx  "),
+            ),
+        )
+        assertValue("4565.72", c.netPnl)
+        assertTrue(c.roundTripCharges.isAvailable)
+    }
+
+    @Test
     fun `a schedule keyed by product needs the product`() {
         val def = syntheticDefinition().copy(
             keyedByProduct = true,
