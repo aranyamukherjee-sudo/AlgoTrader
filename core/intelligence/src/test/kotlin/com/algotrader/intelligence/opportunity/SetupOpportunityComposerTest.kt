@@ -1395,6 +1395,56 @@ class SetupOpportunityComposerTest {
     }
 
     @Test
+    fun `query ordering is deterministic when existing sort keys tie`() {
+        val upSetup = setup(BreakoutDirection.UP)
+        val downOriginal = setup(BreakoutDirection.DOWN)
+        val downSetup = downOriginal.copy(
+            breakout = downOriginal.breakout.copy(
+                id = upSetup.breakout.id,
+                breakAt = t0.minusSeconds(1),
+                confirmedAt = t0
+            )
+        )
+
+        val up = candidate(setup = upSetup)
+        val down = candidate(setup = downSetup)
+
+        val firstRegistry = OpportunityRegistry()
+        assertTrue(
+            firstRegistry.submit(up) is
+                com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+        assertTrue(
+            firstRegistry.submit(down) is
+                com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+
+        val secondRegistry = OpportunityRegistry()
+        assertTrue(
+            secondRegistry.submit(down) is
+                com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+        assertTrue(
+            secondRegistry.submit(up) is
+                com.algotrader.intelligence.common.TransitionResult.Applied
+        )
+
+        assertEquals(2, firstRegistry.size())
+        assertEquals(2, secondRegistry.size())
+        assertEquals(
+            listOf(
+                TradeSide.LONG,
+                TradeSide.SHORT
+            ),
+            firstRegistry.query().map { it.side }
+        )
+        assertEquals(
+            firstRegistry.query(),
+            secondRegistry.query()
+        )
+    }
+
+    @Test
     fun `active query excludes terminal opportunities without mutating registry`() {
         val registry = OpportunityRegistry()
         val submitted = registry.submit(candidate())

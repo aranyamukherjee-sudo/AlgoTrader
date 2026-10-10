@@ -528,6 +528,7 @@ class OpportunityRegistry {
                 .sortedWith(
                     compareBy<Opportunity> { it.detectedAt }
                         .thenBy { it.id.value }
+                        .thenBy { it.side.name }
                         .thenBy { it.strategy.id.value }
                         .thenBy { it.strategy.version }
                         .thenBy { it.instrument.instrument.exchange }
