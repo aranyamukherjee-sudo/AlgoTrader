@@ -10,6 +10,7 @@ import com.algotrader.app.asi3.Asi33DeviceHarness
 import com.algotrader.app.asi3.Asi34DeviceHarness
 import com.algotrader.app.asi3.Asi35DeviceHarness
 import com.algotrader.app.asi3.Asi36DeviceHarness
+import com.algotrader.app.asi3.Asi37DeviceHarness
 import com.algotrader.app.ui.components.AltrixaTone
 import com.algotrader.app.ui.components.altrixaCard
 import com.algotrader.app.ui.components.altrixaLabel
@@ -489,6 +490,69 @@ object StrategiesScreen {
         )
 
         container.addView(asi36Card, topGap)
+
+        val asi37Card = altrixaCard(context)
+        asi37Card.addView(
+            altrixaLabel(
+                context,
+                "Run the complete candle-derived ASI-3.7 pipeline: structure, patterns, breakout qualification, setup context, confluence and opportunity composition. Also checks determinism and lookahead rejection."
+            )
+        )
+
+        val asi37Button = android.widget.Button(context).apply {
+            text = "Run ASI-3.7 Pipeline Integration Test"
+            setOnClickListener {
+                try {
+                    val result = Asi37DeviceHarness.run()
+                    val details = buildString {
+                        appendLine("Candle-derived pipeline: PASS")
+                        appendLine("Candles processed: ${result.candleCount}")
+                        appendLine("Breakout ID: ${result.breakoutId}")
+                        appendLine("Qualification: ${result.qualification}")
+                        appendLine("Opportunity state: ${result.opportunityState}")
+                        appendLine("Determinism: ${if (result.deterministic) "PASS" else "FAIL"}")
+                        appendLine("Lookahead rejection: ${if (result.lookaheadRejected) "PASS" else "FAIL"}")
+                        appendLine("Opportunity ID: ${result.opportunityId}")
+                        appendLine()
+                        appendLine(result.message)
+                    }
+                    AlertDialog.Builder(context)
+                        .setTitle(
+                            if (result.passed) {
+                                "ASI-3.7 Pipeline Test PASSED"
+                            } else {
+                                "ASI-3.7 Pipeline Test FAILED"
+                            }
+                        )
+                        .setMessage(details)
+                        .setPositiveButton("OK", null)
+                        .show()
+                } catch (t: Throwable) {
+                    AlertDialog.Builder(context)
+                        .setTitle("ASI-3.7 Pipeline Test FAILED")
+                        .setMessage(
+                            "Candle-derived pipeline: FAIL\n" +
+                                "Determinism: FAIL or not reached\n" +
+                                "Lookahead rejection: FAIL or not reached\n\n" +
+                                "${t.javaClass.simpleName}: ${t.message ?: "unknown error"}"
+                        )
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+        }
+
+        asi37Card.addView(
+            asi37Button,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = context.dpToPx(8)
+            }
+        )
+
+        container.addView(asi37Card, topGap)
 
         container.addView(altrixaSectionHeader(context, "Live Execution"))
         val engineCard = altrixaCard(context)
