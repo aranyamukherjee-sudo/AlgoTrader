@@ -65,6 +65,10 @@ class PerformanceMetricsTest {
         assertEquals(2.5, metrics.profitFactor)
         assertEquals(100.0, metrics.averageWinningTrade)
         assertEquals(-40.0, metrics.averageLosingTrade)
+        assertEquals(30.0, metrics.expectancyPerTrade, 1e-9)
+        assertEquals(2.5, metrics.averageWinLossRatio!!, 1e-9)
+        assertEquals(60.0, metrics.grossPnl, 1e-9)
+        assertEquals(0, metrics.breakevenTrades)
         assertEquals(40.0, metrics.maxDrawdown, 1e-9)
         assertEquals(40.0 / 1100.0 * 100.0, metrics.maxDrawdownPercent, 1e-9)
     }
@@ -84,14 +88,17 @@ class PerformanceMetricsTest {
             equityCurve = equityCurve
         )
 
-        // Current convention: only strictly positive PnL is a win.
-        // Break-even therefore remains in the non-winning bucket.
+        // A breakeven trade is neither a win nor a loss.
         assertEquals(1, metrics.totalTrades)
         assertEquals(0, metrics.winningTrades)
-        assertEquals(1, metrics.losingTrades)
+        assertEquals(0, metrics.losingTrades)
+        assertEquals(1, metrics.breakevenTrades)
         assertEquals(0.0, metrics.winRate)
         assertEquals(0.0, metrics.netProfit, 1e-9)
+        assertEquals(0.0, metrics.grossPnl, 1e-9)
         assertEquals(0.0, metrics.averageTradePnl, 1e-9)
+        assertEquals(0.0, metrics.expectancyPerTrade, 1e-9)
+        assertNull(metrics.averageWinLossRatio)
     }
 
 

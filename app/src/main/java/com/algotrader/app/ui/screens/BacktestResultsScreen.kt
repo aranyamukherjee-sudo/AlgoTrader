@@ -262,19 +262,30 @@ internal object BacktestResultsScreen {
         container.addView(altrixaSectionHeader(context, title))
         val card = altrixaCard(context)
         card.addView(
-            altrixaLabel(context, BacktestCostPresentation.RANKING_CAPTION).apply {
+            altrixaLabel(context, BacktestCostPresentation.comparisonCaption(results)).apply {
                 textSize = AltrixaDimens.textSmall
                 setTextColor(AltrixaColors.textMuted)
             },
             BacktestScreen.matchWidth(context, bottomMargin = AltrixaDimens.spaceSm)
         )
 
-        val ranked = results.sortedByDescending { it.metrics.netProfit }
-        val maxAbs = max(1.0, ranked.maxOf { abs(it.metrics.netProfit) })
+        val useCostAdjusted =
+            BacktestCostPresentation.usesCostAdjustedComparison(results)
+        val ranked = results.sortedByDescending {
+            BacktestCostPresentation.comparisonPnl(it, useCostAdjusted)
+        }
+        val maxAbs = max(
+            1.0,
+            ranked.maxOf {
+                abs(BacktestCostPresentation.comparisonPnl(it, useCostAdjusted))
+            }
+        )
 
         ranked.forEachIndexed { index, result ->
             val m = result.metrics
-            val tone = pnlTone(m.netProfit, m.totalTrades)
+            val comparisonPnl =
+                BacktestCostPresentation.comparisonPnl(result, useCostAdjusted)
+            val tone = pnlTone(comparisonPnl, m.totalTrades)
 
             val top = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -298,7 +309,7 @@ internal object BacktestResultsScreen {
                 },
                 LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             )
-            if (index == 0 && m.totalTrades > 0 && m.netProfit > 0.0) {
+            if (index == 0 && m.totalTrades > 0 && comparisonPnl > 0.0) {
                 top.addView(
                     altrixaStatusBadge(context, "TOP", AltrixaTone.POSITIVE),
                     LinearLayout.LayoutParams(
@@ -309,7 +320,7 @@ internal object BacktestResultsScreen {
             }
             top.addView(
                 TextView(context).apply {
-                    text = BacktestFormat.signedMoney(m.netProfit)
+                    text = BacktestFormat.signedMoney(comparisonPnl)
                     textSize = AltrixaDimens.textSubtitle
                     setTextColor(altrixaToneColor(tone))
                     setTypeface(typeface, Typeface.BOLD)
@@ -317,8 +328,8 @@ internal object BacktestResultsScreen {
             )
 
             val bar = AltrixaProgressBar(context).apply {
-                setSolidColor(altrixaToneColor(if (m.netProfit >= 0.0) AltrixaTone.POSITIVE else AltrixaTone.NEGATIVE))
-                setProgress(max(2, (abs(m.netProfit) / maxAbs * 100.0).toInt()))
+                setSolidColor(altrixaToneColor(if (comparisonPnl >= 0.0) AltrixaTone.POSITIVE else AltrixaTone.NEGATIVE))
+                setProgress(max(2, (abs(comparisonPnl) / maxAbs * 100.0).toInt()))
             }
 
             val detail = TextView(context).apply {
@@ -397,8 +408,14 @@ internal object BacktestResultsScreen {
             null
     ) {
         val m = result.metrics
-        val tone = pnlTone(m.netProfit, m.totalTrades)
-        val toneColor = altrixaToneColor(tone)
+        val grossTone = pnlTone(m.netProfit, m.totalTrades)
+        val grossToneColor = altrixaToneColor(grossTone)
+        val costModelEnabled =
+            BacktestCostPresentation.isVisible(result.config.researchCostModel)
+        val verdictPnl =
+            if (costModelEnabled) m.costAdjustedNetProfit else m.netProfit
+        val verdictTone = pnlTone(verdictPnl, m.totalTrades)
+        val verdictToneColor = altrixaToneColor(verdictTone)
         val initial = result.config.initialCapital
 
         // ---- Hero ----
@@ -407,7 +424,7 @@ internal object BacktestResultsScreen {
             context,
             AltrixaColors.surfaceElevated,
             AltrixaDimens.radiusLg,
-            if (tone == AltrixaTone.NEUTRAL) AltrixaColors.borderStrong else toneColor
+            if (verdictTone == AltrixaTone.NEUTRAL) AltrixaColors.borderStrong else verdictToneColor
         )
 
         val titleRow = LinearLayout(context).apply {
@@ -425,11 +442,14 @@ internal object BacktestResultsScreen {
         )
         val verdict = when {
             m.totalTrades == 0 -> "NO TRADES"
-            m.netProfit > 0.0 -> "PROFITABLE"
-            m.netProfit < 0.0 -> "LOSS"
+            verdictPnl > 0.0 && costModelEnabled -> "PROFIT AFTER COSTS"
+            verdictPnl < 0.0 && costModelEnabled -> "LOSS AFTER COSTS"
+            verdictPnl > 0.0 -> "PROFITABLE"
+            verdictPnl < 0.0 -> "LOSS"
+            costModelEnabled -> "BREAKEVEN AFTER COSTS"
             else -> "BREAKEVEN"
         }
-        titleRow.addView(altrixaStatusBadge(context, verdict, tone))
+        titleRow.addView(altrixaStatusBadge(context, verdict, verdictTone))
         hero.addView(titleRow, BacktestScreen.matchWidth(context))
 
         hero.addView(
@@ -455,12 +475,12 @@ internal object BacktestResultsScreen {
             TextView(context).apply {
                 text = BacktestFormat.signedMoney(m.netProfit)
                 textSize = AltrixaDimens.textDisplay + 4f
-                setTextColor(toneColor)
+                setTextColor(grossToneColor)
                 setTypeface(typeface, Typeface.BOLD)
             },
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         )
-        pnlRow.addView(altrixaStatusBadge(context, BacktestFormat.signedPercent(m.totalReturnPercent), tone))
+        pnlRow.addView(altrixaStatusBadge(context, BacktestFormat.signedPercent(m.totalReturnPercent), grossTone))
         hero.addView(pnlRow, BacktestScreen.matchWidth(context, topMargin = AltrixaDimens.spaceXs))
 
         hero.addView(altrixaDivider(context))
@@ -470,7 +490,7 @@ internal object BacktestResultsScreen {
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         )
         capitalRow.addView(
-            labelledValue(context, "Final equity", BacktestFormat.money(result.finalEquity), toneColor),
+            labelledValue(context, "Final equity", BacktestFormat.money(result.finalEquity), grossToneColor),
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         )
         hero.addView(capitalRow, BacktestScreen.matchWidth(context))
@@ -524,7 +544,7 @@ internal object BacktestResultsScreen {
         pairRow(
             context, container,
             altrixaMetricCard(context, "Return", BacktestFormat.signedPercent(m.totalReturnPercent), returnTone),
-            altrixaMetricCard(context, "Final equity", BacktestFormat.money(result.finalEquity), tone)
+            altrixaMetricCard(context, "Final equity", BacktestFormat.money(result.finalEquity), grossTone)
         )
         pairRow(
             context, container,

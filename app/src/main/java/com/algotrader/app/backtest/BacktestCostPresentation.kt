@@ -25,6 +25,34 @@ object BacktestCostPresentation {
 
     const val RANKING_CAPTION = "Ranked by P&L before costs."
 
+    /**
+     * Cost-adjusted ranking is comparable only when every result uses the
+     * same non-zero research-cost assumptions.
+     */
+    fun usesCostAdjustedComparison(results: List<BacktestResult>): Boolean {
+        if (results.isEmpty()) return false
+        val model = results.first().config.researchCostModel
+        return isVisible(model) &&
+            results.all { it.config.researchCostModel == model }
+    }
+
+    fun comparisonCaption(results: List<BacktestResult>): String = when {
+        usesCostAdjustedComparison(results) ->
+            "Ranked by cost-adjusted P&L using the same assumed cost model."
+        results.map { it.config.researchCostModel }.distinct().size > 1 ->
+            "Cost assumptions differ; ranked by P&L before costs."
+        else -> RANKING_CAPTION
+    }
+
+    fun comparisonPnl(
+        result: BacktestResult,
+        useCostAdjusted: Boolean
+    ): Double = if (useCostAdjusted) {
+        result.metrics.costAdjustedNetProfit
+    } else {
+        result.metrics.netProfit
+    }
+
     /** Setup-screen explanation, shown whether or not costs are entered. */
     const val SETUP_CAPTION =
         "Generic assumptions for research only \u2014 not your broker's charges and " +

@@ -981,10 +981,13 @@ class BacktestJobStore internal constructor(
                     put("totalTrades", result.metrics.totalTrades)
                     put("winningTrades", result.metrics.winningTrades)
                     put("losingTrades", result.metrics.losingTrades)
+                    put("breakevenTrades", result.metrics.breakevenTrades)
                     put("winRate", result.metrics.winRate)
                     put("grossProfit", result.metrics.grossProfit)
                     put("grossLoss", result.metrics.grossLoss)
                     put("netProfit", result.metrics.netProfit)
+                    put("grossPnl", result.metrics.grossPnl)
+                    put("expectancyPerTrade", result.metrics.expectancyPerTrade)
                     put(
                         "totalReturnPercent",
                         result.metrics.totalReturnPercent
@@ -1013,6 +1016,9 @@ class BacktestJobStore internal constructor(
                     }
                     result.metrics.averageLosingTrade?.let {
                         put("averageLosingTrade", it)
+                    }
+                    result.metrics.averageWinLossRatio?.let {
+                        put("averageWinLossRatio", it)
                     }
                 }
             )
@@ -1095,6 +1101,7 @@ class BacktestJobStore internal constructor(
         val legacyNetProfit = metricsJson.getDouble("netProfit")
         val legacyReturnPercent = metricsJson.getDouble("totalReturnPercent")
 
+        val legacyAverageTradePnl = metricsJson.getDouble("averageTradePnl")
         val metrics = PerformanceMetrics(
             totalTrades = metricsJson.getInt("totalTrades"),
             winningTrades = metricsJson.getInt("winningTrades"),
@@ -1112,12 +1119,20 @@ class BacktestJobStore internal constructor(
                 if (hasCostMetrics) metricsJson.getDouble("costAdjustedReturnPercent") else legacyReturnPercent,
             maxDrawdown = metricsJson.getDouble("maxDrawdown"),
             maxDrawdownPercent = metricsJson.getDouble("maxDrawdownPercent"),
-            averageTradePnl = metricsJson.getDouble("averageTradePnl"),
+            averageTradePnl = legacyAverageTradePnl,
             profitFactor = metricsJson.optDoubleOrNull("profitFactor"),
             averageWinningTrade =
                 metricsJson.optDoubleOrNull("averageWinningTrade"),
             averageLosingTrade =
-                metricsJson.optDoubleOrNull("averageLosingTrade")
+                metricsJson.optDoubleOrNull("averageLosingTrade"),
+            // Older saved records did not distinguish breakeven from losses.
+            // Default to zero rather than inventing a historical count.
+            breakevenTrades = metricsJson.optInt("breakevenTrades", 0),
+            grossPnl = metricsJson.optDouble("grossPnl", legacyNetProfit),
+            expectancyPerTrade =
+                metricsJson.optDouble("expectancyPerTrade", legacyAverageTradePnl),
+            averageWinLossRatio =
+                metricsJson.optDoubleOrNull("averageWinLossRatio")
         )
 
         return BacktestResult(

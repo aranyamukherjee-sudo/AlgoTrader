@@ -19,7 +19,15 @@ data class PerformanceMetrics(
     /** Gross profit divided by the magnitude of gross loss; null when there are no losing trades. */
     val profitFactor: Double?,
     val averageWinningTrade: Double?,
-    val averageLosingTrade: Double?
+    val averageLosingTrade: Double?,
+    /** Number of trades whose gross P&L is exactly zero. */
+    val breakevenTrades: Int = 0,
+    /** Explicit name for the pre-cost P&L retained in [netProfit] for compatibility. */
+    val grossPnl: Double = netProfit,
+    /** Mean gross P&L per trade, including breakeven trades. */
+    val expectancyPerTrade: Double = averageTradePnl,
+    /** Average winning trade divided by the absolute average losing trade; null when undefined. */
+    val averageWinLossRatio: Double? = null
 )
 
 /**
@@ -38,24 +46,33 @@ fun computePerformanceMetrics(
     equityCurve: List<EquityPoint>,
     researchCostModel: ResearchCostModel = ResearchCostModel()
 ): PerformanceMetrics {
-    val winners = trades.filter { it.isWin }
-    val losers = trades.filterNot { it.isWin }
+    val winners = trades.filter { it.grossPnl > 0.0 }
+    val losers = trades.filter { it.grossPnl < 0.0 }
+    val breakevenTrades = trades.count { it.grossPnl == 0.0 }
 
     val grossProfit = winners.sumOf { it.grossPnl }
     val grossLoss = losers.sumOf { it.grossPnl } // <= 0.0
-    val netProfit = finalEquity - initialCapital
+    // The engine's equity is pre-cost: this is gross P&L, not actual net P&L.
+    val grossPnl = finalEquity - initialCapital
+    val netProfit = grossPnl // Retained for compatibility with older callers and saved jobs.
     val researchCosts = trades.sumOf { it.researchCosts(researchCostModel) }
-    val costAdjustedNetProfit = netProfit - researchCosts
-    val totalReturnPercent = if (initialCapital == 0.0) 0.0 else netProfit / initialCapital * 100.0
+    val costAdjustedNetProfit = grossPnl - researchCosts
+    val totalReturnPercent =
+        if (initialCapital == 0.0) 0.0 else grossPnl / initialCapital * 100.0
     val costAdjustedReturnPercent =
         if (initialCapital == 0.0) 0.0 else costAdjustedNetProfit / initialCapital * 100.0
     val winRate = if (trades.isEmpty()) 0.0 else winners.size.toDouble() / trades.size
-    val averageTradePnl = if (trades.isEmpty()) 0.0 else trades.sumOf { it.grossPnl } / trades.size
+    val averageTradePnl =
+        if (trades.isEmpty()) 0.0 else trades.sumOf { it.grossPnl } / trades.size
     val profitFactor = if (grossLoss == 0.0) null else grossProfit / -grossLoss
     val averageWinningTrade = if (winners.isEmpty()) null else grossProfit / winners.size
     val averageLosingTrade = if (losers.isEmpty()) null else grossLoss / losers.size
+    val averageWinLossRatio =
+        if (averageWinningTrade == null || averageLosingTrade == null ||
+            averageLosingTrade == 0.0
+        ) null else averageWinningTrade / -averageLosingTrade
 
-    var peak = equityCurve.firstOrNull()?.equity ?: initialCapital
+    var peak = initialCapital
     var maxDrawdown = 0.0
     var maxDrawdownPercent = 0.0
     for (point in equityCurve) {
@@ -85,6 +102,10 @@ fun computePerformanceMetrics(
         averageTradePnl = averageTradePnl,
         profitFactor = profitFactor,
         averageWinningTrade = averageWinningTrade,
-        averageLosingTrade = averageLosingTrade
+        averageLosingTrade = averageLosingTrade,
+        breakevenTrades = breakevenTrades,
+        grossPnl = grossPnl,
+        expectancyPerTrade = averageTradePnl,
+        averageWinLossRatio = averageWinLossRatio
     )
 }

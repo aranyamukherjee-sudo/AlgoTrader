@@ -60,6 +60,41 @@ class BacktestCostPresentationTest {
         assertEquals("Ranked by P&L before costs.", BacktestCostPresentation.RANKING_CAPTION)
     }
 
+    @Test
+    fun sameNonZeroCostModelEnablesCostAdjustedComparison() {
+        val a = result(costed, researchCosts = 20.0, costAdjustedNet = 80.0)
+        val b = result(costed, researchCosts = 40.0, costAdjustedNet = 60.0)
+
+        assertTrue(BacktestCostPresentation.usesCostAdjustedComparison(listOf(a, b)))
+        assertEquals(
+            "Ranked by cost-adjusted P&L using the same assumed cost model.",
+            BacktestCostPresentation.comparisonCaption(listOf(a, b))
+        )
+        assertEquals(60.0, BacktestCostPresentation.comparisonPnl(b, true), 1e-9)
+        assertEquals(100.0, BacktestCostPresentation.comparisonPnl(b, false), 1e-9)
+    }
+
+    @Test
+    fun zeroCostModelKeepsGrossComparison() {
+        val a = result(ResearchCostModel())
+        assertFalse(BacktestCostPresentation.usesCostAdjustedComparison(listOf(a)))
+        assertEquals(
+            "Ranked by P&L before costs.",
+            BacktestCostPresentation.comparisonCaption(listOf(a))
+        )
+    }
+
+    @Test
+    fun differingCostModelsAreExplicitlyIdentified() {
+        val a = result(costed)
+        val b = result(ResearchCostModel())
+        assertFalse(BacktestCostPresentation.usesCostAdjustedComparison(listOf(a, b)))
+        assertEquals(
+            "Cost assumptions differ; ranked by P&L before costs.",
+            BacktestCostPresentation.comparisonCaption(listOf(a, b))
+        )
+    }
+
     // ---- Visibility ----
 
     @Test

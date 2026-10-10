@@ -88,7 +88,8 @@ internal object BacktestCsvExporter {
             row(
                 "instrument_symbol", "timeframe", "strategy", "sample",
                 "initial_capital", "final_equity", "trade_count",
-                "winning_trades", "losing_trades",
+                "winning_trades", "losing_trades", "breakeven_trades",
+                "gross_expectancy_per_trade", "average_win_loss_ratio",
                 "saved_gross_pnl", "trade_sum_gross_pnl",
                 "gross_pnl_difference", "saved_research_costs",
                 "recomputed_research_costs", "research_cost_difference",
@@ -109,7 +110,7 @@ internal object BacktestCsvExporter {
             val recomputedCosts = result.trades.sumOf { it.researchCosts(model) }
             val recomputedAdjusted = tradeGross - recomputedCosts
             val absolutePnl = result.trades.sumOf { kotlin.math.abs(it.grossPnl) }
-            val grossDiff = tradeGross - metrics.netProfit
+            val grossDiff = tradeGross - metrics.grossPnl
             val costDiff = recomputedCosts - metrics.researchCosts
             val adjustedDiff = recomputedAdjusted - metrics.costAdjustedNetProfit
             val tolerance = 0.01
@@ -122,9 +123,12 @@ internal object BacktestCsvExporter {
                 number(result.config.initialCapital),
                 number(result.finalEquity),
                 result.trades.size,
-                result.trades.count { it.isWin },
-                result.trades.count { !it.isWin },
-                number(metrics.netProfit),
+                result.trades.count { it.grossPnl > 0.0 },
+                result.trades.count { it.grossPnl < 0.0 },
+                result.trades.count { it.grossPnl == 0.0 },
+                number(metrics.expectancyPerTrade),
+                metrics.averageWinLossRatio?.let { number(it) } ?: "",
+                number(metrics.grossPnl),
                 number(tradeGross),
                 number(grossDiff),
                 number(metrics.researchCosts),
