@@ -13,6 +13,7 @@ import com.algotrader.backtest.ExitReason
 import com.algotrader.backtest.PositionSizing
 import com.algotrader.backtest.TradeDirection
 import com.algotrader.backtest.PerformanceMetrics
+import com.algotrader.backtest.ResearchCostModel
 import com.algotrader.domain.Candle
 import com.algotrader.domain.Instrument
 import com.algotrader.domain.Timeframe
@@ -125,7 +126,15 @@ class BacktestJobStore internal constructor(
         val createdAt: Instant,
         val updatedAt: Instant,
         val completedAt: Instant? = null,
-        val errorMessage: String? = null
+        val errorMessage: String? = null,
+        /**
+         * Generic assumed research costs for every strategy in this job.
+         * Persisted so a resumed job uses identical assumptions. Zero (the
+         * default, and the value restored for jobs saved before P3P11)
+         * preserves the historical gross-only behaviour. Not broker or
+         * statutory F&O charges.
+         */
+        val researchCostModel: ResearchCostModel = ResearchCostModel()
     )
 
     private val file = File(storageDir, FILE_NAME)
@@ -147,10 +156,14 @@ class BacktestJobStore internal constructor(
         instrumentType: BacktestInstrumentType = BacktestInstrumentType.INDEX,
         futuresContract: FuturesContractConfig? = null,
         runId: String? = null,
-        sample: BacktestSample = BacktestSample.FULL
+        sample: BacktestSample = BacktestSample.FULL,
+        researchCostModel: ResearchCostModel = ResearchCostModel()
     ): Job {
         require(strategies.isNotEmpty()) {
             "At least one strategy is required for a backtest job"
+        }
+        BacktestCostAssumptions.validationError(researchCostModel)?.let {
+            throw IllegalArgumentException("Invalid research cost assumptions: $it")
         }
 
         val now = Instant.now()
@@ -173,7 +186,8 @@ class BacktestJobStore internal constructor(
             progress = 0,
             currentStep = "Queued",
             createdAt = now,
-            updatedAt = now
+            updatedAt = now,
+            researchCostModel = researchCostModel
         )
 
         writeJob(job)
@@ -912,6 +926,10 @@ class BacktestJobStore internal constructor(
                         positionSizingToJson(result.config.positionSizing)
                     )
                     put("lotSize", result.config.lotSize)
+                    put(
+                        "researchCostModel",
+                        researchCostModelToJson(result.config.researchCostModel)
+                    )
                 }
             )
 
@@ -993,6 +1011,15 @@ class BacktestJobStore internal constructor(
                         result.metrics.maxDrawdownPercent
                     )
                     put("averageTradePnl", result.metrics.averageTradePnl)
+                    put("researchCosts", result.metrics.researchCosts)
+                    put(
+                        "costAdjustedNetProfit",
+                        result.metrics.costAdjustedNetProfit
+                    )
+                    put(
+                        "costAdjustedReturnPercent",
+                        result.metrics.costAdjustedReturnPercent
+                    )
 
                     result.metrics.profitFactor?.let {
                         put("profitFactor", it)
@@ -1063,6 +1090,27 @@ class BacktestJobStore internal constructor(
 
         val metricsJson = json.getJSONObject("metrics")
 
+        // P3P11: cost model + cost metrics. Results saved before this patch
+        // carry neither: restore zero cost with the zero-cost identities
+        // (cost-adjusted == gross). If a model is present, its cost metrics
+        // must be present too; a half-written record is malformed.
+        val costModel =
+            if (configJson.has("researchCostModel")) {
+                // getJSONObject throws if the value is null or not an object.
+                researchCostModelFromJson(configJson.getJSONObject("researchCostModel"))
+            } else {
+                ResearchCostModel()
+            }
+        val hasCostMetrics = metricsJson.has("researchCosts")
+        if (configJson.has("researchCostModel")) {
+            check(hasCostMetrics && metricsJson.has("costAdjustedNetProfit") &&
+                metricsJson.has("costAdjustedReturnPercent")) {
+                "cost model is present but cost metrics are missing"
+            }
+        }
+        val legacyNetProfit = metricsJson.getDouble("netProfit")
+        val legacyReturnPercent = metricsJson.getDouble("totalReturnPercent")
+
         val metrics = PerformanceMetrics(
             totalTrades = metricsJson.getInt("totalTrades"),
             winningTrades = metricsJson.getInt("winningTrades"),
@@ -1072,6 +1120,12 @@ class BacktestJobStore internal constructor(
             grossLoss = metricsJson.getDouble("grossLoss"),
             netProfit = metricsJson.getDouble("netProfit"),
             totalReturnPercent = metricsJson.getDouble("totalReturnPercent"),
+            researchCosts =
+                if (hasCostMetrics) metricsJson.getDouble("researchCosts") else 0.0,
+            costAdjustedNetProfit =
+                if (hasCostMetrics) metricsJson.getDouble("costAdjustedNetProfit") else legacyNetProfit,
+            costAdjustedReturnPercent =
+                if (hasCostMetrics) metricsJson.getDouble("costAdjustedReturnPercent") else legacyReturnPercent,
             maxDrawdown = metricsJson.getDouble("maxDrawdown"),
             maxDrawdownPercent = metricsJson.getDouble("maxDrawdownPercent"),
             averageTradePnl = metricsJson.getDouble("averageTradePnl"),
@@ -1089,7 +1143,8 @@ class BacktestJobStore internal constructor(
                 positionSizing = positionSizingFromJson(
                     configJson.getJSONObject("positionSizing")
                 ),
-                lotSize = configJson.optInt("lotSize", 1).coerceAtLeast(1)
+                lotSize = configJson.optInt("lotSize", 1).coerceAtLeast(1),
+                researchCostModel = costModel
             ),
             finalEquity = json.getDouble("finalEquity"),
             trades = trades,
@@ -1103,6 +1158,34 @@ class BacktestJobStore internal constructor(
             }.getOrDefault(BacktestSample.FULL)
         )
     }
+
+    private fun researchCostModelToJson(model: ResearchCostModel): JSONObject =
+        JSONObject().apply {
+            // Units: percent / bps of combined entry + exit notional / rupees per
+            // completed round trip.
+            put("commissionRatePercent", model.commissionRatePercent)
+            put("slippageBps", model.slippageBps)
+            put("fixedCostPerTrade", model.fixedCostPerTrade)
+        }
+
+    /**
+     * Strict: every field required and finite/non-negative/bounded.
+     * Throws on anything else so corrupt assumptions are never replaced
+     * by zero. Callers that treat a missing object as legacy do so before
+     * calling this.
+     */
+    private fun researchCostModelFromJson(json: JSONObject): ResearchCostModel =
+        when (
+            val outcome = BacktestCostAssumptions.create(
+                json.getDouble("commissionRatePercent"),
+                json.getDouble("slippageBps"),
+                json.getDouble("fixedCostPerTrade")
+            )
+        ) {
+            is BacktestCostAssumptions.Outcome.Valid -> outcome.model
+            is BacktestCostAssumptions.Outcome.Invalid ->
+                throw IllegalStateException("Persisted cost model invalid: ${outcome.message}")
+        }
 
     private fun JSONObject.optDoubleOrNull(key: String): Double? {
         if (!has(key) || isNull(key)) return null
@@ -1203,6 +1286,7 @@ class BacktestJobStore internal constructor(
             put("updatedAt", job.updatedAt.toString())
             job.completedAt?.let { put("completedAt", it.toString()) }
             job.errorMessage?.let { put("errorMessage", it) }
+            put("researchCostModel", researchCostModelToJson(job.researchCostModel))
         }
     }
 
@@ -1275,7 +1359,16 @@ class BacktestJobStore internal constructor(
                 .takeIf { it.isNotEmpty() }
                 ?.let(Instant::parse),
             errorMessage = json.optString("errorMessage", "")
-                .takeIf { it.isNotEmpty() }
+                .takeIf { it.isNotEmpty() },
+            // Jobs saved before P3P11 have no cost model: restore as zero cost.
+            // A present-but-invalid model is malformed, never silently zeroed.
+            researchCostModel =
+                if (json.has("researchCostModel")) {
+                    // getJSONObject throws if the value is null or not an object.
+                    researchCostModelFromJson(json.getJSONObject("researchCostModel"))
+                } else {
+                    ResearchCostModel()
+                }
         )
     }
 

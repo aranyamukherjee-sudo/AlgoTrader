@@ -10,6 +10,8 @@ import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.algotrader.app.backtest.BacktestCostAssumptions
+import com.algotrader.app.backtest.BacktestCostPresentation
 import com.algotrader.app.backtest.BacktestFormat
 import com.algotrader.app.backtest.BacktestJobStore
 import com.algotrader.app.theme.AltrixaColors
@@ -39,6 +41,7 @@ import com.algotrader.backtest.BacktestResult
 import com.algotrader.backtest.BacktestSample
 import com.algotrader.backtest.OutOfSampleSplit
 import com.algotrader.backtest.PositionSizing
+import com.algotrader.backtest.ResearchCostModel
 import com.algotrader.strategy.PositionDirection
 import com.algotrader.strategy.Strategy
 import com.algotrader.strategyengine.StrategyConfiguration
@@ -94,7 +97,8 @@ object BacktestScreen {
             Double,
             PositionSizing,
             BacktestInstrumentType,
-            Boolean
+            Boolean,
+            ResearchCostModel
         ) -> Unit
     ) {
         header(context, container, "Strategy performance analysis")
@@ -280,6 +284,36 @@ object BacktestScreen {
         risk.addView(helper, matchWidth(context, topMargin = AltrixaDimens.spaceSm))
         container.addView(risk, topGap(context))
 
+        // ---- Assumed research costs (P3P11) ----
+        container.addView(altrixaSectionHeader(context, BacktestCostPresentation.SETUP_SECTION_TITLE))
+        val costCard = altrixaCard(context)
+        costCard.addView(
+            altrixaLabel(context, BacktestCostPresentation.SETUP_CAPTION).apply {
+                textSize = AltrixaDimens.textSmall
+                setTextColor(AltrixaColors.textMuted)
+            },
+            matchWidth(context)
+        )
+        costCard.addView(
+            altrixaCaption(context, "Commission (% of combined entry + exit notional)"),
+            matchWidth(context, topMargin = AltrixaDimens.spaceMd)
+        )
+        val commissionInput = altrixaInput(context, "0")
+        costCard.addView(commissionInput, matchWidth(context, topMargin = AltrixaDimens.spaceXs + 2))
+        costCard.addView(
+            altrixaCaption(context, "Slippage (bps of combined entry + exit notional)"),
+            matchWidth(context, topMargin = AltrixaDimens.spaceMd)
+        )
+        val slippageInput = altrixaInput(context, "0")
+        costCard.addView(slippageInput, matchWidth(context, topMargin = AltrixaDimens.spaceXs + 2))
+        costCard.addView(
+            altrixaCaption(context, "Fixed cost per trade (\u20b9 per round trip)"),
+            matchWidth(context, topMargin = AltrixaDimens.spaceMd)
+        )
+        val fixedCostInput = altrixaInput(context, "0")
+        costCard.addView(fixedCostInput, matchWidth(context, topMargin = AltrixaDimens.spaceXs + 2))
+        container.addView(costCard, topGap(context))
+
         // ---- Strategies ----
         val entries = strategies.map { StrategyEntry(it) }
         val countLabel = TextView(context).apply {
@@ -373,6 +407,9 @@ object BacktestScreen {
         runButton.setOnClickListener {
             altrixaStyleInput(capital, hasError = false)
             altrixaStyleInput(quantity, hasError = false)
+            altrixaStyleInput(commissionInput, hasError = false)
+            altrixaStyleInput(slippageInput, hasError = false)
+            altrixaStyleInput(fixedCostInput, hasError = false)
             errorBanner.visibility = View.GONE
 
             val configurations = collectConfigurations(entries) { message, field -> fail(message, field) }
@@ -413,12 +450,35 @@ object BacktestScreen {
                 else -> PositionSizing.FixedQuantity(parsedQuantity)
             }
 
+            val costModel = when (
+                val costOutcome = BacktestCostAssumptions.parse(
+                    commissionInput.text.toString(),
+                    slippageInput.text.toString(),
+                    fixedCostInput.text.toString()
+                )
+            ) {
+                is BacktestCostAssumptions.Outcome.Invalid -> {
+                    fail(
+                        costOutcome.message,
+                        when (costOutcome.field) {
+                            BacktestCostAssumptions.Field.COMMISSION_PERCENT -> commissionInput
+                            BacktestCostAssumptions.Field.SLIPPAGE_BPS -> slippageInput
+                            BacktestCostAssumptions.Field.FIXED_COST_PER_TRADE -> fixedCostInput
+                        }
+                    )
+                    return@setOnClickListener
+                }
+
+                is BacktestCostAssumptions.Outcome.Valid -> costOutcome.model
+            }
+
             onRunBacktest(
                 configurations,
                 capitalValue,
                 sizing,
                 selectedInstrumentType,
-                outOfSampleMode
+                outOfSampleMode,
+                costModel
             )
         }
 
@@ -794,7 +854,7 @@ object BacktestScreen {
                     AltrixaIconKind.CHART,
                     AltrixaColors.accentBright,
                     "No backtests yet",
-                    "Select strategies above and run a backtest. Net P&L, equity curve and every trade will appear here."
+                    "Select strategies above and run a backtest. P&L before costs, equity curve and every trade will appear here."
                 ),
                 matchWidth(context)
             )

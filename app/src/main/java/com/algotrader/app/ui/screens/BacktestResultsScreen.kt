@@ -6,6 +6,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.algotrader.app.backtest.BacktestCostPresentation
 import com.algotrader.app.backtest.BacktestFormat
 import com.algotrader.app.backtest.BacktestInstrumentType
 import com.algotrader.app.backtest.BacktestJobStore
@@ -230,6 +231,13 @@ internal object BacktestResultsScreen {
     ) {
         container.addView(altrixaSectionHeader(context, title))
         val card = altrixaCard(context)
+        card.addView(
+            altrixaLabel(context, BacktestCostPresentation.RANKING_CAPTION).apply {
+                textSize = AltrixaDimens.textSmall
+                setTextColor(AltrixaColors.textMuted)
+            },
+            BacktestScreen.matchWidth(context, bottomMargin = AltrixaDimens.spaceSm)
+        )
 
         val ranked = results.sortedByDescending { it.metrics.netProfit }
         val maxAbs = max(1.0, ranked.maxOf { abs(it.metrics.netProfit) })
@@ -310,6 +318,37 @@ internal object BacktestResultsScreen {
     // One strategy: hero, KPIs, equity curve, statistics
     // -----------------------------------------------------------------
 
+    /**
+     * P3P11: shows generic assumed research costs and the cost-adjusted figures.
+     * Rendered only when the run actually used a non-zero assumption, and always
+     * with the caption that these are neither broker nor statutory F&O charges.
+     */
+    private fun addAssumedCostCard(
+        context: Context,
+        container: LinearLayout,
+        result: BacktestResult,
+        isFutures: Boolean
+    ) {
+        val model = BacktestCostPresentation.card(result, isFutures) ?: return
+
+        container.addView(altrixaSectionHeader(context, model.title))
+        val card = altrixaCard(context)
+        model.rows.forEach { row ->
+            card.addView(
+                fieldRow(context, row.label, row.value),
+                BacktestScreen.matchWidth(context)
+            )
+        }
+        card.addView(
+            altrixaLabel(context, model.caption).apply {
+                textSize = AltrixaDimens.textSmall
+                setTextColor(AltrixaColors.textMuted)
+            },
+            BacktestScreen.matchWidth(context, topMargin = AltrixaDimens.spaceSm)
+        )
+        container.addView(card, BacktestScreen.topGap(context))
+    }
+
     private fun pnlTone(net: Double, trades: Int): AltrixaTone = when {
         trades == 0 -> AltrixaTone.NEUTRAL
         net > 0.0 -> AltrixaTone.POSITIVE
@@ -374,7 +413,7 @@ internal object BacktestResultsScreen {
         hero.addView(
             altrixaCaption(
                 context,
-                if (isFutures) "P&L before costs" else "Net P&L"
+                BacktestCostPresentation.PNL_BEFORE_COSTS
             ),
             BacktestScreen.matchWidth(context, topMargin = AltrixaDimens.spaceLg)
         )
@@ -407,6 +446,7 @@ internal object BacktestResultsScreen {
         hero.addView(capitalRow, BacktestScreen.matchWidth(context))
         container.addView(hero, BacktestScreen.topGap(context))
 
+        addAssumedCostCard(context, container, result, isFutures)
 
         if (isFutures) {
             addFuturesAccountingCard(
@@ -1012,7 +1052,7 @@ internal object BacktestResultsScreen {
                 row("Notional basis", b.notionalBasis)
                 row("Leverage", b.leverage)
                 row("Charges", b.charges)
-                row("Net P&L", b.netPnl)
+                row("Net P&L after F&O charges", b.netPnl)
                 row("Break-even", b.breakEven)
             }
         }

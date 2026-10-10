@@ -54,6 +54,7 @@ import com.algotrader.backtest.BacktestSample
 import com.algotrader.backtest.BacktestLaunchPlan
 import com.algotrader.backtest.StrategyBacktestRunner
 import com.algotrader.backtest.PositionSizing
+import com.algotrader.backtest.ResearchCostModel
 import com.algotrader.app.backtest.BacktestJobStore
 import com.algotrader.app.backtest.BacktestFormat
 import com.algotrader.app.backtest.BacktestWorker
@@ -3659,6 +3660,8 @@ private var isHomeScreenActive = false
 private var selectedBacktestConfigurations: List<StrategyConfiguration> = emptyList()
 private var selectedBacktestCapital: Double = 100_000.0
 private var selectedBacktestSizing: PositionSizing = PositionSizing.FixedQuantity(1.0)
+// P3P11: generic assumed research costs (zero = legacy gross-only behaviour).
+private var selectedBacktestCostModel: ResearchCostModel = ResearchCostModel()
 
 
 private fun showBacktest() {
@@ -3842,10 +3845,11 @@ private fun renderBacktestConfiguration() {
                 "cpr_ema"
             ).map { strategyId -> factory.create(strategyId) }
         }
-    ) { configurations, capital, sizing, instrumentType, outOfSample ->
+    ) { configurations, capital, sizing, instrumentType, outOfSample, costModel ->
         selectedBacktestConfigurations = configurations
         selectedBacktestCapital = capital
         selectedBacktestSizing = sizing
+        selectedBacktestCostModel = costModel
         runBacktest(instrumentType, outOfSample)
     }
 
@@ -3889,6 +3893,7 @@ private fun restoreBacktestJob(job: BacktestJobStore.Job) {
     selectedBacktestConfigurations = job.strategies
     selectedBacktestCapital = job.initialCapital
     selectedBacktestSizing = job.positionSizing
+    selectedBacktestCostModel = job.researchCostModel
 
     val strategyFactory = StrategyFactory()
     val strategies = job.strategies.map {
@@ -4401,6 +4406,10 @@ private fun runBacktest(
          */
         val backtestRunId = java.util.UUID.randomUUID().toString()
 
+        // P3P11: one cost model for the whole launch, so every strategy and
+        // both the in-sample and out-of-sample jobs use identical assumptions.
+        val launchCostModel = selectedBacktestCostModel
+
         /*
          * One selected strategy = one persisted Job + one WorkManager task.
          *
@@ -4425,7 +4434,8 @@ private fun runBacktest(
                 instrumentType = resolved.type,
                 futuresContract = resolved.futuresContract,
                 runId = backtestRunId,
-                sample = unit.sample
+                sample = unit.sample,
+                researchCostModel = launchCostModel
             )
 
             // Only this unit's own candles are persisted for the job, so an

@@ -91,7 +91,10 @@ class BacktestWorker(
                     job.instrumentType,
                     job.instrumentSymbol,
                     job.futuresContract
-                )
+                ),
+                // P3P11: generic assumed research costs, persisted on the job so
+                // a retried/resumed run uses identical assumptions.
+                researchCostModel = job.researchCostModel
             )
 
             val checkpoint = store.getCheckpoint(jobId)
@@ -110,6 +113,11 @@ class BacktestWorker(
 
             require(completedCount <= total) {
                 "Backtest checkpoint is invalid: $completedCount/$total strategies completed"
+            }
+
+            // P3P11: never mix results computed under different cost assumptions.
+            require(BacktestCostAssumptions.checkpointConsistent(job.researchCostModel, results)) {
+                "Backtest checkpoint was created with different cost assumptions"
             }
 
             if (completedCount > 0) {

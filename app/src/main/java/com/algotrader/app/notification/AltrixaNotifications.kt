@@ -9,6 +9,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.algotrader.app.MainActivity
 import com.algotrader.app.R
+import com.algotrader.app.backtest.BacktestCostPresentation
 import com.algotrader.app.backtest.BacktestFormat
 import com.algotrader.app.backtest.BacktestJobStore
 import com.algotrader.app.theme.AltrixaColors
@@ -173,7 +174,7 @@ object AltrixaNotifications {
             shortText = "${result.strategyName} \u00b7 $headline"
             bigText = listOf(
                 "${result.strategyName} \u00b7 $instrument",
-                "Net P&L  $headline",
+                "${BacktestCostPresentation.PNL_BEFORE_COSTS}  $headline",
                 "${m.totalTrades} trades \u00b7 Win rate ${BacktestFormat.percent(m.winRate * 100.0)} \u00b7 " +
                     "Max DD ${BacktestFormat.percent(m.maxDrawdownPercent)}",
                 "Final equity ${BacktestFormat.money(result.finalEquity)}"
