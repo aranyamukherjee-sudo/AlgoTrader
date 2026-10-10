@@ -44,7 +44,7 @@
 |---|---|---|
 | P3P11 | Transaction Costs & Net P&L | ✅ COMPLETE — 16 targeted cost/persistence tests passed; 0 failures, 0 errors |
 | P3P12 | CSV Export | ✅ COMPLETE — CSV download confirmed |
-| P3P13 | Break-even & F&O Cost Analytics | 🟡 IN PROGRESS — P3P13-A complete: comparison CSV now exports persisted futures-accounting diagnostics and PRESENT/ABSENT/MALFORMED restore states; full app tests and debug build passed. Actual broker/statutory charges, net P&L after charges, and break-even remain NOT_MODELLED |
+| P3P13 | Break-even & F&O Cost Analytics | 🟡 IN PROGRESS — P3P13-A/B/C implementation checkpoints complete: accounting-diagnostic CSV export and restore states; validated immutable charge schedules with effective dates and identity matching; break-even regression coverage for dependent charges, non-unique LONG solutions, and non-positive SHORT solutions. Generic charge, net-P&L, and break-even calculations require a valid supplied schedule. Actual sourced broker/statutory rates, broker-fixture reconciliation, and production integration remain outstanding |
 | P3P14 | Backtest Performance Analytics & Cost-Adjusted Comparison | ✅ COMPLETE — local tests and debug build passed; commit `5c73ffd` |
 | P3P15 | Strategy Comparison & Ranking | ✅ COMPLETE — deterministic P&L ranking and alphabetical tie-breaking; commit `1b857c1` |
 | P3P16 | Strategy Intelligence & Diagnostics | ⏳ PLANNED |
@@ -52,7 +52,7 @@
 | P3P18 | Data Robustness & Reproducibility | ⏳ PLANNED |
 | P3P19 | Results, Reporting & Export | ⏳ PLANNED |
 
-**Rule:** Treat each patch according to its recorded status above. P3P11 nonzero-cost and persistence verification passed: 16 targeted tests, 0 failures, 0 errors. P3P12 CSV export is complete and CSV download was confirmed. P3P14 is committed as `5c73ffd` (`feat: improve backtest cost analytics`). Validation: `./gradlew :backtest:test --rerun-tasks`, `./gradlew :app:testDebugUnitTest`, and `./gradlew :app:assembleDebug` all passed; `git diff --check` passed. The generated debug APK SHA-256 was `42365f98bbe74ded7a644fc7c43aed9b434849ee52eb9ff66fe8816982236d44`. These are local test/build results; no new release-CI or physical-device verification is claimed for P3P14. P3P15 is committed as `1b857c1` (`feat: add deterministic strategy ranking`). The focused `BacktestCostPresentationTest` and full `:app:testDebugUnitTest` task passed; `:app:assembleDebug` and `git diff --check` also passed. Debug APK SHA-256: `5ea8ca82bc748487ed8bed98883011a535881d76711e6bc25cc657cf6309ab19`. These are local test/build results; no release-CI or physical-device verification is claimed for P3P15.
+**Rule:** Treat each patch according to its recorded status above. P3P11 nonzero-cost and persistence verification passed: 16 targeted tests, 0 failures, 0 errors. P3P12 CSV export is complete and CSV download was confirmed. P3P13-A/B/C implementation checkpoints are complete, including focused domain tests and break-even edge-case coverage; overall P3P13 remains in progress until sourced charge schedules, broker-fixture reconciliation, and production integration are addressed. P3P14 is committed as `5c73ffd` (`feat: improve backtest cost analytics`). Validation: `./gradlew :backtest:test --rerun-tasks`, `./gradlew :app:testDebugUnitTest`, and `./gradlew :app:assembleDebug` all passed; `git diff --check` passed. The generated debug APK SHA-256 was `42365f98bbe74ded7a644fc7c43aed9b434849ee52eb9ff66fe8816982236d44`. These are local test/build results; no new release-CI or physical-device verification is claimed for P3P14. P3P15 is committed as `1b857c1` (`feat: add deterministic strategy ranking`). The focused `BacktestCostPresentationTest` and full `:app:testDebugUnitTest` task passed; `:app:assembleDebug` and `git diff --check` also passed. Debug APK SHA-256: `5ea8ca82bc748487ed8bed98883011a535881d76711e6bc25cc657cf6309ab19`. These are local test/build results; no release-CI or physical-device verification is claimed for P3P15.
 
 ---
 
@@ -384,11 +384,15 @@ them. Review the existing backlog before selecting the next ASI milestone.
 
 # 7. Current Engineering Baseline
 
-**GitHub `main`:**
+**Latest ASI source checkpoint:**
 
 `7edafe333875015995b146ae6e1f054a142b2a0f` — `ASI-4.9 deterministic opportunity query ordering`.
 
-The source commit and remote `main` were verified synchronized. Focused ASI-4.9 tests and the full `./gradlew test` suite passed. The Android smoke-test results are user-reported; the exact installed APK-to-commit mapping remains unverified.
+**Current GitHub `main` also includes P3P13-C regression coverage:**
+
+`f294dff7754b8c28534b02c9f62fa62d80a06874` — `test: cover futures break-even edge cases`.
+
+That commit was pushed successfully, and local `main` and `origin/main` were reported synchronized. Focused ASI-4.9 tests and the full `./gradlew test` suite passed. The Android smoke-test results are user-reported; the exact installed APK-to-commit mapping remains unverified.
 
 Historical debug APK path:
 
