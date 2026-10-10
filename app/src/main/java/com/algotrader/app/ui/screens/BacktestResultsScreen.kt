@@ -148,7 +148,7 @@ internal object BacktestResultsScreen {
                 exportSymbol, timeframe, results, isFutures
             )
             val comparisonCsv = BacktestCsvExporter.comparisonCsv(
-                exportSymbol, timeframe, results, isFutures
+                exportSymbol, timeframe, results, isFutures, futuresAccounting
             )
             container.addView(
                 altrixaSecondaryButton(context, "EXPORT TRADES CSV") {

@@ -7,6 +7,7 @@ import com.algotrader.backtest.EquityPoint
 import com.algotrader.backtest.ResearchCostModel
 import com.algotrader.backtest.TradeDirection
 import com.algotrader.backtest.computePerformanceMetrics
+import java.math.BigDecimal
 import java.time.Instant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -95,6 +96,125 @@ class BacktestCsvExporterTest {
         assertTrue(csv.contains("\"cost_adjusted_pnl_reconciliation\""))
         assertTrue(csv.contains("Indicative only"))
         assertTrue(csv.contains("not actual broker or statutory charges"))
+    }
+
+    private fun accountingBlock(): FuturesBacktestAccounting.Block =
+        FuturesBacktestAccounting.Block(
+            contractId = "NSE:NIFTY26OCTFUT",
+            lotSize = 65,
+            lotSizeSource = "FYERS_FUTURES_CHAIN",
+            lotSizeEvidence = FuturesBacktestAccounting.LOT_SIZE_EVIDENCE,
+            expiryEpochSeconds = 1792713600L,
+            contractNotional = BigDecimal("6500"),
+            tradeCount = 1,
+            computedTradeCount = 1,
+            calculatorGrossPnl = BigDecimal("6500"),
+            engineGrossPnl = BigDecimal("6500"),
+            grossPnlDifference = BigDecimal.ZERO,
+            grossPnlComparison =
+                FuturesBacktestAccounting.GrossPnlComparison.MATCH,
+            status = FuturesBacktestAccounting.Status.COMPUTED,
+            reason = null
+        )
+
+    private fun csvFields(line: String): List<String> {
+        val fields = mutableListOf<String>()
+        val field = StringBuilder()
+        var quoted = false
+        var index = 0
+
+        while (index < line.length) {
+            val char = line[index]
+            when {
+                char == '"' && quoted &&
+                    index + 1 < line.length &&
+                    line[index + 1] == '"' -> {
+                    field.append('"')
+                    index++
+                }
+                char == '"' -> quoted = !quoted
+                char == ',' && !quoted -> {
+                    fields += field.toString()
+                    field.setLength(0)
+                }
+                else -> field.append(char)
+            }
+            index++
+        }
+        fields += field.toString()
+        return fields
+    }
+
+    @Test
+    fun `comparison export includes present futures accounting diagnostics`() {
+        val csv = BacktestCsvExporter.comparisonCsv(
+            "NSE:NIFTY26OCTFUT",
+            "5m",
+            listOf(result()),
+            true,
+            listOf(
+                BacktestJobStore.RestoredFuturesAccounting.Present(
+                    accountingBlock()
+                )
+            )
+        )
+        val lines = csv.trim().lines()
+        val header = csvFields(lines[0])
+        val row = csvFields(lines[1])
+
+        assertEquals(header.size, row.size)
+        assertTrue(csv.contains("\"futures_accounting_restore_state\""))
+        assertTrue(csv.contains("\"PRESENT\""))
+        assertTrue(csv.contains("\"NSE:NIFTY26OCTFUT\""))
+        assertTrue(csv.contains("\"6500\""))
+        assertTrue(csv.contains("\"MATCH\""))
+        assertTrue(csv.contains("\"NOT_MODELLED\""))
+    }
+
+    @Test
+    fun `comparison export distinguishes absent and malformed accounting`() {
+        val absent = BacktestCsvExporter.comparisonCsv(
+            "NSE:NIFTY26OCTFUT",
+            "5m",
+            listOf(result()),
+            true,
+            listOf(BacktestJobStore.RestoredFuturesAccounting.Absent)
+        )
+        val malformed = BacktestCsvExporter.comparisonCsv(
+            "NSE:NIFTY26OCTFUT",
+            "5m",
+            listOf(result()),
+            true,
+            listOf(
+                BacktestJobStore.RestoredFuturesAccounting.Malformed(
+                    "invalid accounting payload"
+                )
+            )
+        )
+
+        assertTrue(absent.contains("\"ABSENT\""))
+        assertTrue(malformed.contains("\"MALFORMED\""))
+        assertTrue(malformed.contains("\"invalid accounting payload\""))
+        assertTrue(absent.contains("\"NOT_MODELLED\""))
+    }
+
+    @Test
+    fun `comparison export marks accounting not applicable for non futures`() {
+        val csv = BacktestCsvExporter.comparisonCsv(
+            "NSE:X", "5m", listOf(result()), false
+        )
+        assertTrue(csv.contains("\"NOT_APPLICABLE\""))
+    }
+
+    @Test
+    fun `comparison export preserves column alignment with missing accounting`() {
+        val csv = BacktestCsvExporter.comparisonCsv(
+            "NSE:NIFTY26OCTFUT", "5m", listOf(result()), true
+        )
+        val lines = csv.trim().lines()
+        assertEquals(2, lines.size)
+        assertEquals(csvFields(lines[0]).size, csvFields(lines[1]).size)
+        assertTrue(csv.contains("\"ABSENT\""))
     }
 
     @Test

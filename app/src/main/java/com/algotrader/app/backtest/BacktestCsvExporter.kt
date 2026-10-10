@@ -82,7 +82,9 @@ internal object BacktestCsvExporter {
         instrumentSymbol: String,
         timeframe: String,
         results: List<BacktestResult>,
-        isFutures: Boolean
+        isFutures: Boolean,
+        futuresAccounting: List<BacktestJobStore.RestoredFuturesAccounting> =
+            emptyList()
     ): String {
         val lines = mutableListOf(
             row(
@@ -99,11 +101,45 @@ internal object BacktestCsvExporter {
                 "indicative_fno_turnover",
                 "pnl_reconciliation", "research_cost_reconciliation",
                 "cost_adjusted_pnl_reconciliation",
-                "turnover_note", "research_cost_note"
+                "turnover_note", "research_cost_note",
+                "futures_accounting_restore_state",
+                "futures_accounting_status", "futures_contract_id",
+                "futures_lot_size", "futures_lot_size_source",
+                "futures_lot_size_evidence", "futures_expiry_epoch_seconds",
+                "futures_notional_basis", "futures_contract_notional",
+                "futures_accounting_trade_count",
+                "futures_accounting_computed_trade_count",
+                "futures_calculator_gross_pnl", "futures_engine_gross_pnl",
+                "futures_gross_pnl_difference",
+                "futures_gross_pnl_comparison", "futures_accounting_reason",
+                "futures_leverage_status", "futures_charges_status",
+                "futures_net_pnl_status", "futures_break_even_status"
             )
         )
 
-        results.forEach { result ->
+        results.forEachIndexed { resultIndex, result ->
+            val restoredAccounting = futuresAccounting.getOrNull(resultIndex)
+            val accountingState = when {
+                !isFutures -> "NOT_APPLICABLE"
+                restoredAccounting == null ||
+                    restoredAccounting ===
+                    BacktestJobStore.RestoredFuturesAccounting.Absent ->
+                    "ABSENT"
+                restoredAccounting is
+                    BacktestJobStore.RestoredFuturesAccounting.Malformed ->
+                    "MALFORMED"
+                restoredAccounting is
+                    BacktestJobStore.RestoredFuturesAccounting.Present ->
+                    "PRESENT"
+                else -> "MALFORMED"
+            }
+            val accountingBlock =
+                (restoredAccounting as? BacktestJobStore.RestoredFuturesAccounting.Present)
+                    ?.block
+            val unavailableAccountingValue =
+                if (isFutures) FuturesBacktestAccounting.NOT_MODELLED
+                else "NOT_APPLICABLE"
+
             val metrics = result.metrics
             val model = result.config.researchCostModel
             val tradeGross = result.trades.sumOf { it.grossPnl }
@@ -147,7 +183,33 @@ internal object BacktestCsvExporter {
                 } else {
                     "Not applicable to this non-futures backtest"
                 },
-                "Assumed research friction; not actual broker or statutory charges"
+                "Assumed research friction; not actual broker or statutory charges",
+                accountingState,
+                accountingBlock?.status?.name.orEmpty(),
+                accountingBlock?.contractId.orEmpty(),
+                accountingBlock?.lotSize?.toString().orEmpty(),
+                accountingBlock?.lotSizeSource.orEmpty(),
+                accountingBlock?.lotSizeEvidence.orEmpty(),
+                accountingBlock?.expiryEpochSeconds?.toString().orEmpty(),
+                accountingBlock?.notionalBasis.orEmpty(),
+                accountingBlock?.contractNotional?.toPlainString().orEmpty(),
+                accountingBlock?.tradeCount?.toString().orEmpty(),
+                accountingBlock?.computedTradeCount?.toString().orEmpty(),
+                accountingBlock?.calculatorGrossPnl?.toPlainString().orEmpty(),
+                accountingBlock?.engineGrossPnl?.toPlainString().orEmpty(),
+                accountingBlock?.grossPnlDifference?.toPlainString().orEmpty(),
+                accountingBlock?.grossPnlComparison?.name.orEmpty(),
+                when (restoredAccounting) {
+                    is BacktestJobStore.RestoredFuturesAccounting.Malformed ->
+                        restoredAccounting.reason
+                    is BacktestJobStore.RestoredFuturesAccounting.Present ->
+                        accountingBlock?.reason.orEmpty()
+                    else -> ""
+                },
+                accountingBlock?.leverage ?: unavailableAccountingValue,
+                accountingBlock?.charges ?: unavailableAccountingValue,
+                accountingBlock?.netPnl ?: unavailableAccountingValue,
+                accountingBlock?.breakEven ?: unavailableAccountingValue
             )
         }
 

@@ -44,7 +44,7 @@
 |---|---|---|
 | P3P11 | Transaction Costs & Net P&L | ✅ COMPLETE — 16 targeted cost/persistence tests passed; 0 failures, 0 errors |
 | P3P12 | CSV Export | ✅ COMPLETE — CSV download confirmed |
-| P3P13 | Break-even & F&O Cost Analytics | ⏳ PLANNED |
+| P3P13 | Break-even & F&O Cost Analytics | 🟡 IN PROGRESS — P3P13-A complete: comparison CSV now exports persisted futures-accounting diagnostics and PRESENT/ABSENT/MALFORMED restore states; full app tests and debug build passed. Actual broker/statutory charges, net P&L after charges, and break-even remain NOT_MODELLED |
 | P3P14 | Backtest Performance Analytics & Cost-Adjusted Comparison | ✅ COMPLETE — local tests and debug build passed; commit `5c73ffd` |
 | P3P15 | Strategy Comparison & Ranking | ✅ COMPLETE — deterministic P&L ranking and alphabetical tie-breaking; commit `1b857c1` |
 | P3P16 | Strategy Intelligence & Diagnostics | ⏳ PLANNED |
