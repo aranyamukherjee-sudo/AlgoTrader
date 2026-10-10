@@ -1,6 +1,6 @@
 # ALTRIXA / AlgoTrader — Master Progress & Status Report
 
-**Last updated:** 2026-10-10
+**Last updated:** 2026-10-11
 **Repository:** `aranyamukherjee-sudo/AlgoTrader`  
 **Branch:** `main`  
 **Latest verified ASI source checkpoint:** `7edafe333875015995b146ae6e1f054a142b2a0f` — `ASI-4.9 deterministic opportunity query ordering`
@@ -14,7 +14,7 @@
 |---|---|
 | Phase 1 — Foundation | ✅ COMPLETE |
 | Phase 2 — Market Data + UI | ✅ COMPLETE |
-| Phase 3 — Backtesting + Strategy Intelligence | 🟡 ACTIVE — P3P11 and P3P12 complete; ASI roadmap continues |
+| Phase 3 — Backtesting + Strategy Intelligence | 🟡 ACTIVE — P3P11, P3P12 and P3P14 complete; ASI roadmap continues |
 | Phase 4 — Paper Execution | ⏳ FUTURE |
 | Phase 5 — Advanced Intelligence | ⏳ FUTURE |
 | Phase 6 — Broker Integration | ⏳ FUTURE |
@@ -45,14 +45,14 @@
 | P3P11 | Transaction Costs & Net P&L | ✅ COMPLETE — 16 targeted cost/persistence tests passed; 0 failures, 0 errors |
 | P3P12 | CSV Export | ✅ COMPLETE — CSV download confirmed |
 | P3P13 | Break-even & F&O Cost Analytics | ⏳ PLANNED |
-| P3P14 | Backtest Performance Analytics | ⏳ PLANNED |
+| P3P14 | Backtest Performance Analytics & Cost-Adjusted Comparison | ✅ COMPLETE — local tests and debug build passed; commit `5c73ffd` |
 | P3P15 | Strategy Comparison & Ranking | ⏳ PLANNED |
 | P3P16 | Strategy Intelligence & Diagnostics | ⏳ PLANNED |
 | P3P17 | Optimization & Walk-forward Testing | ⏳ PLANNED |
 | P3P18 | Data Robustness & Reproducibility | ⏳ PLANNED |
 | P3P19 | Results, Reporting & Export | ⏳ PLANNED |
 
-**Rule:** Treat each patch according to its recorded status above. P3P11 nonzero-cost and persistence verification passed: 16 targeted tests, 0 failures, 0 errors. P3P12 CSV export is complete.
+**Rule:** Treat each patch according to its recorded status above. P3P11 nonzero-cost and persistence verification passed: 16 targeted tests, 0 failures, 0 errors. P3P12 CSV export is complete and CSV download was confirmed. P3P14 is committed as `5c73ffd` (`feat: improve backtest cost analytics`). Validation: `./gradlew :backtest:test --rerun-tasks`, `./gradlew :app:testDebugUnitTest`, and `./gradlew :app:assembleDebug` all passed; `git diff --check` passed. The generated debug APK SHA-256 was `42365f98bbe74ded7a644fc7c43aed9b434849ee52eb9ff66fe8816982236d44`. These are local test/build results; no new release-CI or physical-device verification is claimed for P3P14.
 
 ---
 
