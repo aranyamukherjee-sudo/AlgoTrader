@@ -285,6 +285,69 @@ class SetupOpportunityComposerTest {
         }
     }
 
+
+    // ASI-4.3 orchestrator regression tests
+
+    @Test
+    fun `orchestrator sorts candidates chronologically and registers occurrences`() {
+        val orchestrator = OpportunityOrchestrator()
+        val originalSetup = setup(BreakoutDirection.UP)
+        val laterAt = t0.plusSeconds(120)
+        val laterSetup = originalSetup.copy(
+            breakout = originalSetup.breakout.copy(
+                breakAt = laterAt,
+                confirmedAt = laterAt
+            )
+        )
+
+        val result = orchestrator.process(
+            listOf(
+                candidate(setup = laterSetup, evaluatedAt = laterAt),
+                candidate(setup = originalSetup, evaluatedAt = t0)
+            )
+        )
+
+        assertEquals(listOf(t0, laterAt), result.items.map { it.candidate.evaluatedAt })
+        assertEquals(2, result.created.size)
+        assertTrue(result.alreadyPresent.isEmpty())
+        assertTrue(result.rejected.isEmpty())
+        assertTrue(result.isSuccessful)
+        assertEquals(2, orchestrator.size())
+    }
+
+    @Test
+    fun `orchestrator repeated input is idempotent`() {
+        val orchestrator = OpportunityOrchestrator()
+        val input = candidate()
+
+        val first = orchestrator.process(listOf(input))
+        val second = orchestrator.process(listOf(input))
+
+        assertEquals(1, first.created.size)
+        assertEquals(1, second.alreadyPresent.size)
+        assertTrue(second.rejected.isEmpty())
+        assertEquals(1, orchestrator.size())
+        assertEquals(first.created.single(), second.alreadyPresent.single())
+    }
+
+    @Test
+    fun `orchestrator reports invalid candidate and continues processing`() {
+        val orchestrator = OpportunityOrchestrator()
+        val valid = candidate()
+        val invalid = valid.copy(
+            context = valid.context.copy(
+                breakoutId = BreakoutId("ASI43_INVALID")
+            )
+        )
+
+        val result = orchestrator.process(listOf(invalid, valid))
+
+        assertEquals(1, result.created.size)
+        assertEquals(1, result.rejected.size)
+        assertTrue(!result.isSuccessful)
+        assertEquals(1, orchestrator.size())
+    }
+
     // ASI-4.1 registry regression tests
 
     private fun candidate(
